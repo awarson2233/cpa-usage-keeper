@@ -1,0 +1,90 @@
+name: Build linux arm32 binary
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Optional version string embedded in the package name and binary metadata; defaults to tag name or dev-<short-sha>'
+        required: false
+        type: string
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  binary-linux-arm32:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      GOOS: linux
+      GOARCH: arm
+      GOARM: '7'
+      ASSET_ARCH: arm32
+      CC: arm-linux-gnueabihf-gcc
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          check-latest: true
+          cache: true
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential gcc-arm-linux-gnueabihf
+
+      - name: Install frontend dependencies
+        run: npm --prefix ./web ci
+
+      - name: Build frontend
+        run: npm --prefix ./web run build
+
+      - name: Build linux arm32 binary package
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+
+          if [[ -n "${INPUT_VERSION}" ]]; then
+            version="${INPUT_VERSION}"
+          elif [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            version="${GITHUB_REF_NAME}"
+          else
+            version="dev-${GITHUB_SHA::7}"
+          fi
+
+          package_name="cpa-usage-keeper_${version}_${GOOS}_${ASSET_ARCH}"
+          package_dir="dist/${package_name}"
+          mkdir -p "${package_dir}/data"
+
+          CGO_ENABLED=1 GOOS="${GOOS}" GOARCH="${GOARCH}" GOARM="${GOARM}" CC="${CC}" \
+            go build -trimpath -ldflags="-s -w -X cpa-usage-keeper/internal/version.Version=${version}" -o "${package_dir}/cpa-usage-keeper" ./cmd/server/main.go
+
+          cp .env.example README.md README.zh.md LICENSE "${package_dir}/"
+          cp deploy/linux/cpa-usage-keeper.service "${package_dir}/"
+          tar -czf "dist/${package_name}.tar.gz" -C dist "${package_name}"
+
+      - name: Upload linux arm32 binary package artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: cpa-usage-keeper-linux-arm32-${{ github.run_id }}
+          path: dist/cpa-usage-keeper_*_linux_arm32.tar.gz
+          if-no-files-found: error
