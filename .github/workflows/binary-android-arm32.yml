@@ -1,4 +1,4 @@
-name: Build linux arm32 binary
+name: Build android arm32 binary
 
 on:
   workflow_dispatch:
@@ -19,15 +19,16 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  binary-linux-arm32:
+  binary-android-arm32:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
-      GOOS: linux
+      GOOS: android
       GOARCH: arm
       GOARM: '7'
+      ANDROID_API: '21'
+      NDK_VERSION: '27.2.12479018'
       ASSET_ARCH: arm32
-      CC: arm-linux-gnueabihf-gcc
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -46,10 +47,14 @@ jobs:
           cache: npm
           cache-dependency-path: web/package-lock.json
 
-      - name: Install build dependencies
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android NDK
         run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential gcc-arm-linux-gnueabihf
+          set -euo pipefail
+          sdkmanager --install "ndk;${NDK_VERSION}"
+          echo "ANDROID_NDK_HOME=${ANDROID_HOME}/ndk/${NDK_VERSION}" >> "${GITHUB_ENV}"
 
       - name: Install frontend dependencies
         run: npm --prefix ./web ci
@@ -57,7 +62,7 @@ jobs:
       - name: Build frontend
         run: npm --prefix ./web run build
 
-      - name: Build linux arm32 binary package
+      - name: Build android arm32 binary package
         env:
           INPUT_VERSION: ${{ inputs.version }}
         run: |
@@ -75,16 +80,18 @@ jobs:
           package_dir="dist/${package_name}"
           mkdir -p "${package_dir}/data"
 
-          CGO_ENABLED=1 GOOS="${GOOS}" GOARCH="${GOARCH}" GOARM="${GOARM}" CC="${CC}" \
-            go build -trimpath -ldflags="-s -w -X cpa-usage-keeper/internal/version.Version=${version}" -o "${package_dir}/cpa-usage-keeper" ./cmd/server/main.go
+          export CC="${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi${ANDROID_API}-clang"
+          export CXX="${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi${ANDROID_API}-clang++"
+
+          CGO_ENABLED=1 GOOS="${GOOS}" GOARCH="${GOARCH}" GOARM="${GOARM}" CC="${CC}" CXX="${CXX}" \
+            go build -trimpath -buildmode=pie -ldflags="-s -w -X cpa-usage-keeper/internal/version.Version=${version}" -o "${package_dir}/cpa-usage-keeper" ./cmd/server/main.go
 
           cp .env.example README.md README.zh.md LICENSE "${package_dir}/"
-          cp deploy/linux/cpa-usage-keeper.service "${package_dir}/"
           tar -czf "dist/${package_name}.tar.gz" -C dist "${package_name}"
 
-      - name: Upload linux arm32 binary package artifact
+      - name: Upload android arm32 binary package artifact
         uses: actions/upload-artifact@v6
         with:
-          name: cpa-usage-keeper-linux-arm32-${{ github.run_id }}
-          path: dist/cpa-usage-keeper_*_linux_arm32.tar.gz
+          name: cpa-usage-keeper-android-arm32-${{ github.run_id }}
+          path: dist/cpa-usage-keeper_*_android_arm32.tar.gz
           if-no-files-found: error
