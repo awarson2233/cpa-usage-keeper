@@ -42,6 +42,9 @@ const (
 	migrationAddUsageEventCPAResponseFields         = "20260528_add_usage_event_cpa_response_fields"
 	migrationModelPricePricingStyle                 = "20260531_model_price_pricing_style"
 	migrationBackfillClaudeUsageTokens              = "20260601_backfill_claude_usage_tokens"
+	migrationAddUsageEventExecutorType              = "20260602_add_usage_event_executor_type"
+	migrationAddUsageIdentityFileFields             = "20260603_add_usage_identity_file_fields"
+	migrationBackfillGeminiCodexTokenFormat         = "20260605_backfill_gemini_codex_token_format"
 )
 
 type schemaMigration struct {
@@ -128,6 +131,9 @@ func orderedMigrations() []databaseMigration {
 		{version: migrationAddUsageEventCPAResponseFields, run: addUsageEventCPAResponseFieldsMigration},
 		{version: migrationModelPricePricingStyle, run: addModelPricePricingStyleMigration},
 		{version: migrationBackfillClaudeUsageTokens, run: backfillClaudeUsageTokensMigration},
+		{version: migrationAddUsageEventExecutorType, run: addUsageEventExecutorTypeMigration},
+		{version: migrationAddUsageIdentityFileFields, run: addUsageIdentityFileFieldsMigration},
+		{version: migrationBackfillGeminiCodexTokenFormat, run: backfillGeminiCodexTokenFormatMigration},
 	}
 }
 

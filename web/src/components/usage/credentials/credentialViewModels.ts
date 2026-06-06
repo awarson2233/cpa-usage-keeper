@@ -11,6 +11,12 @@ export interface QuotaWindowUsageDisplay {
   cost: string
 }
 
+export interface QuotaBillingUsageDisplay {
+  used?: string
+  limit?: string
+  remaining?: string
+}
+
 export interface DisplayQuota {
   key: string
   label: string
@@ -23,6 +29,8 @@ export interface DisplayQuota {
   resetText?: string
   windowSeconds?: number
   windowUsage?: QuotaWindowUsageDisplay
+  windowUsageEstimate?: QuotaWindowUsageDisplay
+  billingUsage?: QuotaBillingUsageDisplay
   status: QuotaStatus
 }
 
@@ -196,8 +204,31 @@ function toDisplayQuota(row: UsageQuotaRow): DisplayQuota | undefined {
     resetText: row.resetAt,
     windowSeconds,
     windowUsage: quotaWindowUsage(row),
+    windowUsageEstimate: quotaWindowUsageEstimate(row, percentDisplay),
+    billingUsage: quotaBillingUsage(row),
     status: quotaStatus(row, percentDisplay.percent, percentDisplay.kind),
   }
+}
+
+function quotaBillingUsage(row: UsageQuotaRow): QuotaBillingUsageDisplay | undefined {
+  if (row.metric !== 'usd_cents') {
+    return undefined
+  }
+  const used = finiteNumber(row.used)
+  const limit = finiteNumber(row.limit)
+  const remaining = finiteNumber(row.remaining)
+  if (used === undefined && limit === undefined && remaining === undefined) {
+    return undefined
+  }
+  return {
+    used: used === undefined ? undefined : formatUSDCents(used),
+    limit: limit === undefined ? undefined : formatUSDCents(limit),
+    remaining: remaining === undefined ? undefined : formatUSDCents(remaining),
+  }
+}
+
+function formatUSDCents(cents: number): string {
+  return formatQuotaWindowCost(cents / 100)
 }
 
 function quotaWindowUsage(row: UsageQuotaRow): QuotaWindowUsageDisplay | undefined {
@@ -212,9 +243,27 @@ function quotaWindowUsage(row: UsageQuotaRow): QuotaWindowUsageDisplay | undefin
   }
 }
 
+function quotaWindowUsageEstimate(row: UsageQuotaRow, percentDisplay: { percent: number | null; kind: DisplayQuota['percentKind'] }): QuotaWindowUsageDisplay | undefined {
+  // 估算只在已用百分比可外推时生效；0%、满额或免费窗口都继续展示当前值。
+  const tokens = finiteNumber(row.window_usage_tokens)
+  const cost = finiteNumber(row.window_usage_cost)
+  const usedPercent = quotaUsedPercent(percentDisplay)
+  if (tokens === undefined || cost === undefined || usedPercent === undefined) {
+    return undefined
+  }
+  if (tokens <= 0 || cost <= 0 || usedPercent <= 0 || usedPercent >= 100) {
+    return undefined
+  }
+  const ratio = usedPercent / 100
+  return {
+    tokens: formatCompactTokenValue(tokens / ratio),
+    cost: formatQuotaWindowCost(cost / ratio),
+  }
+}
+
 function formatQuotaWindowCost(cost: number): string {
   // 限额条下方空间很紧，窗口成本统一展示两位小数，避免 0 显示成 0.0000。
-  return new Intl.NumberFormat(undefined, {
+  return new Intl.NumberFormat('en-US', {
     style: 'currency',
     currency: 'USD',
     minimumFractionDigits: 2,
@@ -346,6 +395,19 @@ function quotaBarPercent(percent: number | null, kind: DisplayQuota['percentKind
     return null
   }
   return kind === 'used' ? clampPercent(100 - percent) : percent
+}
+
+function quotaUsedPercent(percentDisplay: { percent: number | null; kind: DisplayQuota['percentKind'] }): number | undefined {
+  if (percentDisplay.percent === null) {
+    return undefined
+  }
+  if (percentDisplay.kind === 'used') {
+    return clampPercent(percentDisplay.percent)
+  }
+  if (percentDisplay.kind === 'remaining') {
+    return clampPercent(100 - percentDisplay.percent)
+  }
+  return undefined
 }
 
 function isDisplayableQuota(quota: DisplayQuota | undefined): quota is DisplayQuota {

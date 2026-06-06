@@ -6,6 +6,7 @@ import codexIcon from '@/assets/icons/codex.svg'
 import geminiIcon from '@/assets/icons/gemini.svg'
 import iflowIcon from '@/assets/icons/iflow.svg'
 import openaiIcon from '@/assets/icons/openai.svg'
+import xaiIcon from '@/assets/icons/xai.svg'
 import { IconFilterAll } from '@/components/ui/icons'
 import type { UsageIdentityTypeCount } from '@/lib/types'
 import styles from './CredentialSections.module.scss'
@@ -26,6 +27,7 @@ const providerIconUrls: Partial<Record<KnownCredentialProviderFilterKey, string>
   'gemini-cli': geminiIcon,
   iflow: iflowIcon,
   openai: openaiIcon,
+  xai: xaiIcon,
 }
 
 export function CredentialProviderFilterBar({ scope, typeCounts, value, onChange }: CredentialProviderFilterBarProps) {
@@ -66,10 +68,10 @@ export function CredentialProviderFilterBar({ scope, typeCounts, value, onChange
   )
 }
 
-function CredentialProviderFilterIcon({ provider }: { provider: CredentialProviderFilterKey | KnownCredentialProviderFilterKey }) {
+export function CredentialProviderFilterIcon({ provider }: { provider: string }) {
   if (provider === 'all') {
     return <IconFilterAll size={21} />
   }
-  const src = providerIconUrls[provider]
+  const src = providerIconUrls[provider as KnownCredentialProviderFilterKey]
   return src ? <img src={src} alt="" aria-hidden="true" /> : null
 }

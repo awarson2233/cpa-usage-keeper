@@ -189,6 +189,110 @@ describe('credentialViewModels', () => {
     expect(rows[0].displayQuotas[0].windowUsage).toEqual({ tokens: '0', cost: '$0.00' })
   })
 
+  it('formats provider quota window usage with fixed compact units and US dollar decimals', () => {
+    const quotas = new Map<string, UsageQuotaRow[]>([
+      ['auth-1', [
+        { key: 'rate_limit.primary_window', label: '5h', usedPercent: 3, window_usage_tokens: 11_368_055, window_usage_cost: 14.83442025 },
+        { key: 'additional_rate_limits.GPT-5.3-Codex-Spark.primary_window', label: 'GPT-5.3-Codex-Spark 5h', usedPercent: 0, window_usage_tokens: 393_311, window_usage_cost: 0.458464 },
+      ]],
+    ])
+
+    const rows = buildAuthFileCredentialRows([identity({ identity: 'auth-1' })], quotas)
+
+    expect(rows[0].displayQuotas.map((quota) => quota.windowUsage)).toEqual([
+      { tokens: '11.37M', cost: '$14.83' },
+      { tokens: '393.31K', cost: '$0.46' },
+    ])
+  })
+
+  it('formats xai billing quota cents as dollar spend without token window usage', () => {
+    const quotas = new Map<string, UsageQuotaRow[]>([
+      ['xai-auth', [
+        { key: 'billing.monthly', label: 'Monthly Spend', scope: 'billing', metric: 'usd_cents', used: 167, limit: 20000, remaining: 19833, usedPercent: 0.835, window: { seconds: 2592000 }, resetAt: '2026-07-01T00:00:00+00:00' },
+      ]],
+    ])
+
+    const rows = buildAuthFileCredentialRows([identity({ identity: 'xai-auth', type: 'xai', provider: 'xAI' })], quotas)
+
+    expect(rows[0].displayQuotas[0]).toMatchObject({
+      label: 'Monthly Spend',
+      percent: 0.835,
+      percentKind: 'used',
+      barPercent: 99.165,
+      billingUsage: {
+        used: '$1.67',
+        limit: '$200.00',
+        remaining: '$198.33',
+      },
+      windowUsage: undefined,
+      windowUsageEstimate: undefined,
+    })
+  })
+
+  it('estimates quota window usage only from positive current usage and a partial used percent', () => {
+    const quotas = new Map<string, UsageQuotaRow[]>([
+      ['auth-1', [
+        { key: 'rate_limit.primary_window', label: '5h', usedPercent: 25, window_usage_tokens: 1_000_000, window_usage_cost: 2.5 },
+        { key: 'rate_limit.secondary_window', label: 'Weekly', remainingFraction: 0.75, window_usage_tokens: 500_000, window_usage_cost: 1 },
+      ]],
+    ])
+
+    const rows = buildAuthFileCredentialRows([identity({ identity: 'auth-1' })], quotas)
+
+    expect(rows[0].displayQuotas.map((quota) => quota.windowUsageEstimate)).toEqual([
+      { tokens: '4.00M', cost: '$10.00' },
+      { tokens: '2.00M', cost: '$4.00' },
+    ])
+  })
+
+  it('keeps current quota window usage when the used percent or current cost cannot be estimated', () => {
+    const quotas = new Map<string, UsageQuotaRow[]>([
+      ['auth-1', [
+        { key: 'rate_limit.zero_window', label: 'Zero', usedPercent: 0, window_usage_tokens: 393_311, window_usage_cost: 0.458464 },
+        { key: 'rate_limit.full_window', label: 'Full', usedPercent: 100, window_usage_tokens: 1_000, window_usage_cost: 1 },
+        { key: 'rate_limit.free_window', label: 'Free', usedPercent: 50, window_usage_tokens: 1_000, window_usage_cost: 0 },
+        { key: 'rate_limit.empty_window', label: 'Empty', usedPercent: 50, window_usage_tokens: 0, window_usage_cost: 1 },
+      ]],
+    ])
+
+    const rows = buildAuthFileCredentialRows([identity({ identity: 'auth-1' })], quotas)
+
+    expect(rows[0].displayQuotas.map((quota) => quota.windowUsage)).toEqual([
+      { tokens: '393.31K', cost: '$0.46' },
+      { tokens: '1.00K', cost: '$1.00' },
+      { tokens: '1.00K', cost: '$0.00' },
+      { tokens: '0', cost: '$1.00' },
+    ])
+    expect(rows[0].displayQuotas.map((quota) => quota.windowUsageEstimate)).toEqual([
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+    ])
+  })
+
+  it('uses an explicit US locale for quota window cost formatting', () => {
+    const numberFormatSpy = vi.spyOn(Intl, 'NumberFormat')
+    try {
+      const quotas = new Map<string, UsageQuotaRow[]>([
+        ['auth-1', [
+          { key: 'rate_limit.primary_window', label: '5h', usedPercent: 3, window_usage_tokens: 11_368_055, window_usage_cost: 14.83442025 },
+        ]],
+      ])
+
+      buildAuthFileCredentialRows([identity({ identity: 'auth-1' })], quotas)
+
+      expect(numberFormatSpy).toHaveBeenCalledWith('en-US', expect.objectContaining({
+        style: 'currency',
+        currency: 'USD',
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2,
+      }))
+    } finally {
+      numberFormatSpy.mockRestore()
+    }
+  })
+
   it('uses normalized input token semantics for auth file cache rate', () => {
     const rows = buildAuthFileCredentialRows([
       identity({ identity: 'auth-claude', type: 'claude', input_tokens: 1000, cached_tokens: 600 }),

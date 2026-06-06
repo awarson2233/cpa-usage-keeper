@@ -26,13 +26,17 @@ type Service struct {
 	db       *gorm.DB
 	registry ProviderRegistry
 
-	refreshMu           sync.Mutex
-	refreshTasks        map[string]*RefreshTaskRecord
-	refreshWorkerTokens chan struct{}
-	refreshTaskTTL      time.Duration
-	refreshCooldown     func(time.Duration)
-	refreshContext      context.Context
-	refreshCancel       context.CancelFunc
+	refreshMu    sync.Mutex
+	refreshTasks map[string]*RefreshTaskRecord
+	// inspectionCompletedAt 只记录用户手动启动巡检后，该巡检轮次完成的时间。
+	inspectionCompletedAt       time.Time
+	inspectionRoundActive       bool
+	inspectionRoundAuthIndexSet map[string]struct{}
+	refreshWorkerTokens         chan struct{}
+	refreshTaskTTL              time.Duration
+	refreshCooldown             func(time.Duration)
+	refreshContext              context.Context
+	refreshCancel               context.CancelFunc
 	// autoRefreshInterval 控制后台 runner 的 tick 周期。
 	autoRefreshInterval time.Duration
 	// autoRefreshActiveTTL 控制前端心跳失效前可继续自动刷新的时间窗。

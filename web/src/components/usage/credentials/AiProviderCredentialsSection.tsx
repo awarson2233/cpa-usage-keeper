@@ -22,7 +22,6 @@ export function AiProviderCredentialsSection({ rows, total, page, totalPages, pa
 
   return (
     <CredentialSectionShell
-      eyebrow={t('usage_stats.credentials_ai_providers_eyebrow')}
       title={t('usage_stats.credentials_ai_providers_title')}
       subtitle={t('usage_stats.credentials_ai_providers_subtitle')}
       countLabel={t('usage_stats.credentials_count', { count: total })}
@@ -63,6 +62,7 @@ export function AiProviderCredentialsSection({ rows, total, page, totalPages, pa
           { value: 'priority', label: t('usage_stats.credentials_sort_priority') },
           { value: 'total_requests', label: t('usage_stats.credentials_sort_total_requests') },
           { value: 'total_tokens', label: t('usage_stats.credentials_sort_total_tokens') },
+          { value: 'last_used_at', label: t('usage_stats.credentials_sort_last_used') },
         ]}
         previousLabel={t('usage_stats.previous_page')}
         nextLabel={t('usage_stats.next_page')}

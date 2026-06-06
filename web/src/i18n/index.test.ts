@@ -18,13 +18,18 @@ describe('i18n resources', () => {
     }
   });
 
-  it('localizes Analysis tab and composition titles in Chinese', () => {
+  it('localizes Analysis tab and composition controls in Chinese', () => {
     expect(i18n.getResource('zh', 'translation', 'usage_stats.tab_analysis')).toBe('分析');
-    expect(i18n.getResource('zh', 'translation', 'usage_stats.analysis_auth_files_composition_title')).toBe('认证文件构成');
-    expect(i18n.getResource('zh', 'translation', 'usage_stats.analysis_ai_provider_composition_title')).toBe('AI 供应商构成');
+    expect(i18n.getResource('en', 'translation', 'usage_stats.analysis_composition_title')).toBe('Usage Distribution');
+    expect(i18n.getResource('zh', 'translation', 'usage_stats.analysis_composition_title')).toBe('用量分布');
+    expect(i18n.getResource('zh', 'translation', 'usage_stats.analysis_composition_auth_files_tab')).toBe('认证文件');
+    expect(i18n.getResource('zh', 'translation', 'usage_stats.analysis_composition_ai_provider_tab')).toBe('AI 供应商');
+    expect(i18n.getResource('zh', 'translation', 'usage_stats.analysis_composition_token_percent')).toBe('Token %');
     expect(i18n.getResource('zh-TW', 'translation', 'usage_stats.tab_analysis')).toBe('分析');
-    expect(i18n.getResource('zh-TW', 'translation', 'usage_stats.analysis_auth_files_composition_title')).toBe('認證檔案組成');
-    expect(i18n.getResource('zh-TW', 'translation', 'usage_stats.analysis_ai_provider_composition_title')).toBe('AI 供應商組成');
+    expect(i18n.getResource('zh-TW', 'translation', 'usage_stats.analysis_composition_title')).toBe('用量分布');
+    expect(i18n.getResource('zh-TW', 'translation', 'usage_stats.analysis_composition_auth_files_tab')).toBe('認證檔案');
+    expect(i18n.getResource('zh-TW', 'translation', 'usage_stats.analysis_composition_ai_provider_tab')).toBe('AI 供應商');
+    expect(i18n.getResource('zh-TW', 'translation', 'usage_stats.analysis_composition_token_percent')).toBe('Token %');
   });
 
   it('keeps the all option in the API Key filter generic across languages', () => {
@@ -46,16 +51,36 @@ describe('i18n resources', () => {
     expect(i18n.getResource('zh-TW', 'translation', 'usage_stats.request_type')).toBe('類型');
   });
 
-  it('keeps Analysis heatmap cell tooltips focused on model totals', () => {
-    expect(i18n.getResource('en', 'translation', 'usage_stats.analysis_heatmap_cell_title')).toBe('{{model}}: {{tokens}} Tokens, {{requests}} Requests');
-    expect(i18n.getResource('zh', 'translation', 'usage_stats.analysis_heatmap_cell_title')).toBe('{{model}}：{{tokens}} Token，{{requests}} 次请求');
-    expect(i18n.getResource('zh-TW', 'translation', 'usage_stats.analysis_heatmap_cell_title')).toBe('{{model}}：{{tokens}} Token，{{requests}} 次請求');
+  it('keeps Analysis heatmap copy focused on hover details', () => {
+    expect(i18n.getResource('en', 'translation', 'usage_stats.analysis_heatmap_subtitle')).toBe('Token distribution across API keys and models with hover details.');
+    expect(i18n.getResource('zh', 'translation', 'usage_stats.analysis_heatmap_subtitle')).toBe('展示 API Key 与模型组合下的 Token 分布，悬浮查看明细。');
+    expect(i18n.getResource('zh-TW', 'translation', 'usage_stats.analysis_heatmap_subtitle')).toBe('顯示 API Key 與模型組合下的 Token 分布，懸浮查看明細。');
   });
 
-  it('localizes compact Analysis heatmap cell prefixes', () => {
+  it('labels Analysis cost blended rate metrics', () => {
+    expect(i18n.getResource('en', 'translation', 'usage_stats.analysis_cost_per_million_tokens')).toBe('Cost / 1M Tokens');
+    expect(i18n.getResource('en', 'translation', 'usage_stats.analysis_blended_rate')).toBe('Blended Rate');
+    expect(i18n.getResource('en', 'translation', 'usage_stats.analysis_cost_share')).toBe('Cost Share');
+    expect(i18n.getResource('en', 'translation', 'usage_stats.analysis_cost_rate_sparkline_hint')).toBe('Recent Cost / 1M Tokens by time bucket');
+    expect(i18n.getResource('zh', 'translation', 'usage_stats.analysis_blended_rate')).toBe('混合费率');
+    expect(i18n.getResource('zh', 'translation', 'usage_stats.analysis_cost_share')).toBe('成本占比');
+    expect(i18n.getResource('zh', 'translation', 'usage_stats.analysis_cost_rate_sparkline_hint')).toBe('按时间桶展示最近的每 1M Token 成本');
+    expect(i18n.getResource('zh-TW', 'translation', 'usage_stats.analysis_blended_rate')).toBe('混合費率');
+    expect(i18n.getResource('zh-TW', 'translation', 'usage_stats.analysis_cost_share')).toBe('成本占比');
+    expect(i18n.getResource('zh-TW', 'translation', 'usage_stats.analysis_cost_rate_sparkline_hint')).toBe('按時間桶顯示最近的每 1M Token 成本');
+  });
+
+  it('removes obsolete Analysis API and model stats labels', () => {
     for (const language of SUPPORTED_LANGUAGES) {
-      expect(i18n.getResource(language, 'translation', 'usage_stats.analysis_heatmap_tokens_prefix')).toBe('T');
-      expect(i18n.getResource(language, 'translation', 'usage_stats.analysis_heatmap_requests_prefix')).toBe('R');
+      const usageStats = i18n.getResourceBundle(language, 'translation').usage_stats;
+      expect(usageStats).not.toHaveProperty('api_details');
+      expect(usageStats).not.toHaveProperty('api_details_title');
+      expect(usageStats).not.toHaveProperty('api_details_subtitle');
+      expect(usageStats).not.toHaveProperty('api_details_eyebrow');
+      expect(usageStats).not.toHaveProperty('model_stats');
+      expect(usageStats).not.toHaveProperty('model_stats_title');
+      expect(usageStats).not.toHaveProperty('model_stats_subtitle');
+      expect(usageStats).not.toHaveProperty('model_stats_eyebrow');
     }
   });
 
@@ -73,6 +98,25 @@ describe('i18n resources', () => {
     expect(i18n.getResource('en', 'translation', 'auth.invalid_api_key')).toBe('API Key is incorrect');
     expect(i18n.getResource('zh', 'translation', 'auth.invalid_api_key')).toBe('API Key 错误');
     expect(i18n.getResource('zh-TW', 'translation', 'auth.invalid_api_key')).toBe('API Key 錯誤');
+  });
+
+  it('uses compact status-code labels for Auth Files inspection failures', () => {
+    for (const language of SUPPORTED_LANGUAGES) {
+      expect(i18n.getResource(language, 'translation', 'usage_stats.credentials_inspection_401')).toBe('401');
+      expect(i18n.getResource(language, 'translation', 'usage_stats.credentials_inspection_402')).toBe('402');
+    }
+  });
+
+  it('labels unknown Auth Files inspection results in every language', () => {
+    expect(i18n.getResource('en', 'translation', 'usage_stats.credentials_inspection_unknown')).toBe('Unknown');
+    expect(i18n.getResource('zh', 'translation', 'usage_stats.credentials_inspection_unknown')).toBe('未知');
+    expect(i18n.getResource('zh-TW', 'translation', 'usage_stats.credentials_inspection_unknown')).toBe('未知');
+  });
+
+  it('labels reached-limit Auth Files inspection results in every language', () => {
+    expect(i18n.getResource('en', 'translation', 'usage_stats.credentials_inspection_limit_reached')).toBe('Limit reached');
+    expect(i18n.getResource('zh', 'translation', 'usage_stats.credentials_inspection_limit_reached')).toBe('达到限额');
+    expect(i18n.getResource('zh-TW', 'translation', 'usage_stats.credentials_inspection_limit_reached')).toBe('達到限額');
   });
 
   it('keeps the login product title aligned across languages', () => {

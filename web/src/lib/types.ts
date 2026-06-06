@@ -17,6 +17,7 @@ export interface StatusResponse {
   timezone: string
   version?: string
   updateCheckEnabled?: boolean
+  quotaAutoRefreshEnabled?: boolean
   cpa_public_url?: string
   last_run_at?: string
   last_error?: string
@@ -116,6 +117,7 @@ export interface UsageEvent {
   api_key?: string
   model: string
   reasoning_effort?: string
+  executor_type?: string
   endpoint?: string
   source: string
   source_raw?: string
@@ -125,6 +127,7 @@ export interface UsageEvent {
   failed: boolean
   latency_ms: number
   ttft_ms?: number
+  speed_tps?: number
   tokens: UsageEventTokens
   cost_usd?: number
   cost_available?: boolean
@@ -165,6 +168,8 @@ export interface UsageIdentity {
   type: string
   provider: string
   prefix: string
+  file_name?: string
+  file_path?: string
   priority?: number
   disabled: boolean
   note?: string
@@ -240,6 +245,7 @@ export interface UsageQuotaCheckResponse {
 
 export interface UsageQuotaCacheItem {
   auth_index: string
+  file_name?: string
   status: 'completed' | 'failed'
   quota?: UsageQuotaCheckResponse
   error?: string
@@ -254,12 +260,41 @@ export interface UsageQuotaCacheResponse {
 
 export interface UsageQuotaRefreshTaskResponse {
   authIndex: string
+  file_name?: string
   status: 'queued' | 'running' | 'completed' | 'failed'
   quota?: UsageQuotaCheckResponse
   error?: string
   http_status_code?: number
   refreshed_at?: string
   expiresAt?: string
+}
+
+export type UsageQuotaInspectionResultStatus = 'normal' | 'limit_reached' | 'unauthorized_401' | 'payment_required_402' | 'other_failed'
+
+export interface UsageQuotaInspectionResult {
+  auth_index: string
+  name: string
+  type: string
+  file_name?: string
+  status: UsageQuotaInspectionResultStatus
+  error?: string
+  http_status_code?: number
+  refreshed_at?: string
+}
+
+export interface UsageQuotaInspectionStatusResponse {
+  total: number
+  cached: number
+  running: boolean
+  completed: boolean
+  completed_at?: string
+  normal: number
+  limit_reached: number
+  unauthorized_401: number
+  payment_required_402: number
+  other_failed: number
+  unknown: number
+  results: UsageQuotaInspectionResult[]
 }
 
 export interface UsageQuotaRefreshTaskRef {
@@ -287,6 +322,8 @@ export interface AnalysisTokenUsageBucket {
   reasoning_tokens: number
   total_tokens: number
   requests: number
+  cost_usd: number
+  cost_available: boolean
 }
 
 export interface AnalysisCompositionItem {
@@ -295,20 +332,56 @@ export interface AnalysisCompositionItem {
   total_tokens: number
   requests: number
   percent: number
+  input_tokens: number
+  output_tokens: number
+  cached_tokens: number
+  reasoning_tokens: number
+  cost_usd: number
+  cost_available: boolean
 }
 
 export interface AnalysisHeatmapCell {
   api_key: string
   model: string
+  input_tokens: number
+  output_tokens: number
+  cached_tokens: number
+  reasoning_tokens: number
   total_tokens: number
   requests: number
+  cost_usd: number
+  cost_available: boolean
   intensity: number
 }
 
 export interface AnalysisHeatmapPayload {
   api_keys: string[]
+  api_key_labels: Record<string, string>
   models: string[]
   cells: AnalysisHeatmapCell[]
+}
+
+export interface AnalysisCostBreakdown {
+  input_cost_usd: number
+  output_cost_usd: number
+  cached_cost_usd: number
+  total_cost_usd: number
+  cost_available: boolean
+}
+
+export interface AnalysisModelEfficiencyItem {
+  model: string
+  requests: number
+  input_tokens: number
+  output_tokens: number
+  cached_tokens: number
+  reasoning_tokens: number
+  total_tokens: number
+  cost_usd: number
+  cost_available: boolean
+  cost_per_request_usd: number
+  output_tokens_per_request: number
+  cache_rate: number
 }
 
 export interface AnalysisResponse {
@@ -322,6 +395,8 @@ export interface AnalysisResponse {
   auth_files_composition: AnalysisCompositionItem[]
   ai_provider_composition: AnalysisCompositionItem[]
   heatmap: AnalysisHeatmapPayload
+  cost_breakdown: AnalysisCostBreakdown
+  model_efficiency: AnalysisModelEfficiencyItem[]
 }
 
 export interface CpaApiKeySettingsItem {

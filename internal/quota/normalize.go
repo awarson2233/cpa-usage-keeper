@@ -2,6 +2,7 @@ package quota
 
 import (
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"time"
@@ -53,6 +54,13 @@ func NormalizeQuotaRows(output ProviderOutput) []QuotaRow {
 			return nil
 		}
 		return normalizeKimiQuotaRows(*result)
+	case XAIResult:
+		return normalizeXAIQuotaRows(result)
+	case *XAIResult:
+		if result == nil {
+			return nil
+		}
+		return normalizeXAIQuotaRows(*result)
 	default:
 		return nil
 	}
@@ -212,13 +220,15 @@ func appendCodexWindowQuotaRow(rows []QuotaRow, key string, label string, scope 
 	}
 	label = codexWindowLabel(key, label, window.LimitWindowSeconds)
 	row := QuotaRow{
-		Key:          key,
-		Label:        label,
-		Scope:        scope,
-		Metric:       metric,
-		UsedPercent:  floatPtr(window.UsedPercent),
-		Allowed:      info.Allowed,
-		LimitReached: info.LimitReached,
+		Key:               key,
+		Label:             label,
+		Scope:             scope,
+		Metric:            metric,
+		UsedPercent:       floatPtr(window.UsedPercent),
+		Allowed:           info.Allowed,
+		LimitReached:      info.LimitReached,
+		WindowUsageTokens: window.WindowUsageTokens,
+		WindowUsageCost:   window.WindowUsageCost,
 	}
 	if window.LimitWindowSeconds != 0 {
 		row.Window = &QuotaWindow{Seconds: intPtr(window.LimitWindowSeconds)}
@@ -338,6 +348,35 @@ func normalizeKimiQuotaRows(result KimiResult) []QuotaRow {
 		rows = append(rows, row)
 	}
 	return rows
+}
+
+func normalizeXAIQuotaRows(result XAIResult) []QuotaRow {
+	// xAI billing 的 val 是 USD cents；后端缓存保留 cents，前端按 metric=usd_cents 格式化成美元。
+	if result.Billing == nil || result.Billing.Config == nil {
+		return nil
+	}
+	config := result.Billing.Config
+	limit := config.MonthlyLimit.Val
+	used := config.Used.Val
+	remaining := math.Max(0, limit-used)
+	row := QuotaRow{
+		Key:       "billing.monthly",
+		Label:     "Monthly Spend",
+		Scope:     "billing",
+		Metric:    "usd_cents",
+		Used:      floatPtr(used),
+		Limit:     floatPtr(limit),
+		Remaining: floatPtr(remaining),
+		Window:    &QuotaWindow{Seconds: intPtr(quotaWindowThirtyDaySeconds)},
+		ResetAt:   config.BillingPeriodEnd,
+	}
+	if limit > 0 {
+		row.UsedPercent = floatPtr(used / limit * 100)
+		limitReached := used >= limit
+		row.LimitReached = boolPtr(limitReached)
+		row.Allowed = boolPtr(!limitReached)
+	}
+	return []QuotaRow{row}
 }
 
 func kimiDetailQuotaRow(key string, scope string, fallbackLabel string, detail *KimiUsageDetail) QuotaRow {

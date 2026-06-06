@@ -87,6 +87,8 @@ func parseCodexUsageWindow(object map[string]json.RawMessage) *CodexUsageWindow 
 		LimitWindowSeconds: intField(object, "limit_window_seconds", "limitWindowSeconds"),
 		ResetAfterSeconds:  intField(object, "reset_after_seconds", "resetAfterSeconds"),
 		ResetAt:            intField(object, "reset_at", "resetAt"),
+		WindowUsageTokens:  intPtrField(object, "window_usage_tokens", "windowUsageTokens"),
+		WindowUsageCost:    floatPtrField(object, "window_usage_cost", "windowUsageCost"),
 	}
 }
 
@@ -267,6 +269,64 @@ func parseKimiUsagePayload(response *apicall.Response) (*KimiUsagePayload, error
 	return payload, nil
 }
 
+func parseXAIBillingPayload(response *apicall.Response) (*XAIBillingPayload, error) {
+	object, err := parseResponseObject(response)
+	if err != nil {
+		return nil, err
+	}
+	if _, ok := object["config"]; !ok {
+		if nested := objectField(object, "body"); nested != nil {
+			object = nested
+		}
+	}
+	configObject := objectField(object, "config")
+	payload := &XAIBillingPayload{Config: parseXAIBillingConfig(configObject)}
+	return payload, nil
+}
+
+func parseXAIBillingConfig(object map[string]json.RawMessage) *XAIBillingConfig {
+	if object == nil {
+		return nil
+	}
+	config := &XAIBillingConfig{
+		MonthlyLimit:       parseXAIMoneyValue(objectField(object, "monthlyLimit", "monthly_limit")),
+		Used:               parseXAIMoneyValue(objectField(object, "used")),
+		OnDemandCap:        parseXAIMoneyValue(objectField(object, "onDemandCap", "on_demand_cap")),
+		BillingPeriodStart: stringField(object, "billingPeriodStart", "billing_period_start"),
+		BillingPeriodEnd:   stringField(object, "billingPeriodEnd", "billing_period_end"),
+	}
+	for _, raw := range arrayField(object, "history") {
+		historyObject := rawObject(raw)
+		if historyObject == nil {
+			continue
+		}
+		config.History = append(config.History, XAIBillingHistoryItem{
+			BillingCycle: parseXAIBillingCycle(objectField(historyObject, "billingCycle", "billing_cycle")),
+			IncludedUsed: parseXAIMoneyValue(objectField(historyObject, "includedUsed", "included_used")),
+			OnDemandUsed: parseXAIMoneyValue(objectField(historyObject, "onDemandUsed", "on_demand_used")),
+			TotalUsed:    parseXAIMoneyValue(objectField(historyObject, "totalUsed", "total_used")),
+		})
+	}
+	return config
+}
+
+func parseXAIBillingCycle(object map[string]json.RawMessage) XAIBillingCycle {
+	if object == nil {
+		return XAIBillingCycle{}
+	}
+	return XAIBillingCycle{
+		Year:  intField(object, "year"),
+		Month: intField(object, "month"),
+	}
+}
+
+func parseXAIMoneyValue(object map[string]json.RawMessage) XAIMoneyValue {
+	if object == nil {
+		return XAIMoneyValue{}
+	}
+	return XAIMoneyValue{Val: floatField(object, "val")}
+}
+
 func parseKimiUsageDetail(object map[string]json.RawMessage) *KimiUsageDetail {
 	if object == nil {
 		return nil
@@ -381,6 +441,9 @@ func floatPtrField(object map[string]json.RawMessage, keys ...string) *float64 {
 func floatValue(object map[string]json.RawMessage, keys ...string) (float64, bool) {
 	for _, key := range keys {
 		if raw, ok := object[key]; ok {
+			if rawJSONNull(raw) {
+				continue
+			}
 			var number float64
 			if err := json.Unmarshal(raw, &number); err == nil {
 				return number, true
@@ -397,12 +460,25 @@ func floatValue(object map[string]json.RawMessage, keys ...string) (float64, boo
 	return 0, false
 }
 
+func rawJSONNull(raw json.RawMessage) bool {
+	return len(raw) == 4 && raw[0] == 'n' && raw[1] == 'u' && raw[2] == 'l' && raw[3] == 'l'
+}
+
 func intField(object map[string]json.RawMessage, keys ...string) int64 {
 	value, ok := floatValue(object, keys...)
 	if !ok {
 		return 0
 	}
 	return int64(value)
+}
+
+func intPtrField(object map[string]json.RawMessage, keys ...string) *int64 {
+	value, ok := floatValue(object, keys...)
+	if !ok {
+		return nil
+	}
+	parsed := int64(value)
+	return &parsed
 }
 
 func boolField(object map[string]json.RawMessage, keys ...string) bool {
