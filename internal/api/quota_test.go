@@ -14,6 +14,9 @@ import (
 )
 
 type quotaProviderStub struct {
+	resetRequest             quota.ResetRequest
+	resetResponse            quota.ResetResponse
+	resetErr                 error
 	refreshRequest           quota.RefreshRequest
 	refreshResponse          quota.RefreshResponse
 	refreshErr               error
@@ -61,6 +64,14 @@ func (s *quotaProviderStub) GetInspectionStatus(ctx context.Context) (quota.Insp
 		return quota.InspectionStatus{}, s.inspectionStatusErr
 	}
 	return s.inspectionStatusResponse, nil
+}
+
+func (s *quotaProviderStub) Reset(ctx context.Context, request quota.ResetRequest) (quota.ResetResponse, error) {
+	s.resetRequest = request
+	if s.resetErr != nil {
+		return quota.ResetResponse{}, s.resetErr
+	}
+	return s.resetResponse, nil
 }
 
 func (s *quotaProviderStub) StartInspection(ctx context.Context) (quota.InspectionStatus, error) {
@@ -124,7 +135,7 @@ func TestQuotaInspectionStatusReturnsSummary(t *testing.T) {
 	refreshedAt := time.Date(2026, 6, 3, 10, 30, 0, 0, time.UTC)
 	completedAt := time.Date(2026, 6, 3, 10, 31, 0, 0, time.UTC)
 	provider := &quotaProviderStub{inspectionStatusResponse: quota.InspectionStatus{
-		Total: 3, Cached: 2, Running: true, Normal: 1, Unauthorized401: 1, CompletedAt: &completedAt,
+		Total: 3, Cached: 2, Running: true, Normal: 1, Unauthorized401: 1, PaymentRequired402: 1, Unauthorized401402: 2, CompletedAt: &completedAt,
 		Results: []quota.InspectionResult{{AuthIndex: "auth-1", Name: "Claude Main", Type: "claude", FileName: apiStringPtr("claude-user.json"), Status: quota.InspectionResultStatusNormal, RefreshedAt: &refreshedAt}},
 	}}
 	router := NewRouter(nil, nil, nil, nil, AuthConfig{}, nil, "", OptionalProviders{Quota: provider})
@@ -140,7 +151,7 @@ func TestQuotaInspectionStatusReturnsSummary(t *testing.T) {
 		t.Fatalf("expected status lookup only, got status=%d start=%d", provider.inspectionStatusCalls, provider.inspectionStartCalls)
 	}
 	body := resp.Body.String()
-	if !contains(body, `"total":3`) || !contains(body, `"cached":2`) || !contains(body, `"unauthorized_401":1`) || !contains(body, `"completed_at":"2026-06-03T10:31:00Z"`) || !contains(body, `"auth_index":"auth-1"`) || !contains(body, `"file_name":"claude-user.json"`) || !contains(body, `"refreshed_at":"2026-06-03T10:30:00Z"`) {
+	if !contains(body, `"total":3`) || !contains(body, `"cached":2`) || !contains(body, `"unauthorized_401_402":2`) || !contains(body, `"completed_at":"2026-06-03T10:31:00Z"`) || !contains(body, `"auth_index":"auth-1"`) || !contains(body, `"file_name":"claude-user.json"`) || !contains(body, `"refreshed_at":"2026-06-03T10:30:00Z"`) {
 		t.Fatalf("unexpected response body: %s", body)
 	}
 	if contains(body, `"provider"`) {
@@ -290,5 +301,142 @@ func TestQuotaDoesNotExposeProviderSpecificEndpoints(t *testing.T) {
 		if resp.Code != http.StatusNotFound {
 			t.Fatalf("expected %s to return 404, got %d", path, resp.Code)
 		}
+	}
+}
+
+func TestQuotaResetReturnsResetResponse(t *testing.T) {
+	provider := &quotaProviderStub{resetResponse: quota.ResetResponse{AuthIndex: "codex-auth", Code: "reset", WindowsReset: 2}}
+	router := NewRouter(nil, nil, nil, nil, AuthConfig{}, nil, "", OptionalProviders{Quota: provider})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/quota/reset", strings.NewReader(`{"auth_index":"codex-auth"}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d body=%s", resp.Code, resp.Body.String())
+	}
+	if provider.resetRequest.AuthIndex != "codex-auth" {
+		t.Fatalf("expected reset request auth_index codex-auth, got %+v", provider.resetRequest)
+	}
+	body := resp.Body.String()
+	if !contains(body, `"authIndex":"codex-auth"`) || !contains(body, `"code":"reset"`) || !contains(body, `"windowsReset":2`) {
+		t.Fatalf("unexpected response body: %s", body)
+	}
+}
+
+func TestQuotaResetRejectsEmptyAuthIndex(t *testing.T) {
+	provider := &quotaProviderStub{}
+	router := NewRouter(nil, nil, nil, nil, AuthConfig{}, nil, "", OptionalProviders{Quota: provider})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/quota/reset", strings.NewReader(`{"auth_index":"   "}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400, got %d body=%s", resp.Code, resp.Body.String())
+	}
+	if provider.resetRequest.AuthIndex != "" {
+		t.Fatalf("provider should not be called for empty auth_index, got %+v", provider.resetRequest)
+	}
+}
+
+func TestQuotaResetMapsNotFoundTo404(t *testing.T) {
+	provider := &quotaProviderStub{resetErr: quota.ErrNotFound}
+	router := NewRouter(nil, nil, nil, nil, AuthConfig{}, nil, "", OptionalProviders{Quota: provider})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/quota/reset", strings.NewReader(`{"auth_index":"missing-auth"}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusNotFound {
+		t.Fatalf("expected status 404, got %d body=%s", resp.Code, resp.Body.String())
+	}
+}
+
+func TestQuotaResetMapsUnsupportedTypeTo400(t *testing.T) {
+	provider := &quotaProviderStub{resetErr: quota.ErrUnsupportedType}
+	router := NewRouter(nil, nil, nil, nil, AuthConfig{}, nil, "", OptionalProviders{Quota: provider})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/quota/reset", strings.NewReader(`{"auth_index":"claude-auth"}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400, got %d body=%s", resp.Code, resp.Body.String())
+	}
+	if body := resp.Body.String(); !contains(body, `"error":"quota_reset_failed"`) || !contains(body, "quota identity type is unsupported") {
+		t.Fatalf("unexpected response body: %s", body)
+	}
+}
+
+func TestQuotaResetMapsProviderHTTPErrorToTargetStatus(t *testing.T) {
+	provider := &quotaProviderStub{resetErr: quota.ProviderHTTPError{StatusCode: 429, Message: "rate limited"}}
+	router := NewRouter(nil, nil, nil, nil, AuthConfig{}, nil, "", OptionalProviders{Quota: provider})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/quota/reset", strings.NewReader(`{"auth_index":"codex-auth"}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected status 429, got %d body=%s", resp.Code, resp.Body.String())
+	}
+	if body := resp.Body.String(); !contains(body, `"error":"quota_reset_failed"`) || !contains(body, "HTTP 429: rate limited") {
+		t.Fatalf("unexpected response body: %s", body)
+	}
+}
+
+func TestQuotaResetMapsProviderUnauthorizedAwayFromAppAuth(t *testing.T) {
+	provider := &quotaProviderStub{resetErr: quota.ProviderHTTPError{StatusCode: http.StatusUnauthorized, Message: "invalid codex token"}}
+	router := NewRouter(nil, nil, nil, nil, AuthConfig{}, nil, "", OptionalProviders{Quota: provider})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/quota/reset", strings.NewReader(`{"auth_index":"codex-auth"}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusBadGateway {
+		t.Fatalf("expected provider 401 to map to 502, got %d body=%s", resp.Code, resp.Body.String())
+	}
+	if body := resp.Body.String(); !contains(body, `"error":"quota_reset_failed"`) || !contains(body, "HTTP 401: invalid codex token") {
+		t.Fatalf("unexpected response body: %s", body)
+	}
+}
+
+func TestQuotaResetMapsValidationTo400(t *testing.T) {
+	provider := &quotaProviderStub{resetErr: quota.ErrValidation}
+	router := NewRouter(nil, nil, nil, nil, AuthConfig{}, nil, "", OptionalProviders{Quota: provider})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/quota/reset", strings.NewReader(`{"auth_index":"codex-auth"}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400, got %d body=%s", resp.Code, resp.Body.String())
+	}
+	if body := resp.Body.String(); !contains(body, "auth_index is required") {
+		t.Fatalf("unexpected response body: %s", body)
+	}
+}
+
+func TestQuotaResetMapsResetInProgressTo409(t *testing.T) {
+	provider := &quotaProviderStub{resetErr: quota.ErrResetInProgress}
+	router := NewRouter(nil, nil, nil, nil, AuthConfig{}, nil, "", OptionalProviders{Quota: provider})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/quota/reset", strings.NewReader(`{"auth_index":"codex-auth"}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusConflict {
+		t.Fatalf("expected status 409, got %d body=%s", resp.Code, resp.Body.String())
+	}
+	if body := resp.Body.String(); !contains(body, `"error":"quota_reset_failed"`) || !contains(body, "quota reset already in progress") {
+		t.Fatalf("unexpected response body: %s", body)
 	}
 }

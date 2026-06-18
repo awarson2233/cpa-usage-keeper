@@ -1,24 +1,7 @@
 import { useState, useMemo, useCallback, useEffect, useRef, type KeyboardEvent, type SyntheticEvent } from 'react';
 import { useTranslation } from 'react-i18next';
-import {
-  Chart as ChartJS,
-  CategoryScale,
-  LinearScale,
-  LogarithmicScale,
-  PointElement,
-  LineElement,
-  LineController,
-  ScatterController,
-  BarElement,
-  BarController,
-  ArcElement,
-  Title,
-  Tooltip,
-  Legend,
-  Filler
-} from 'chart.js';
-import { ApiError, fetchAnalysis, fetchCpaApiKeyOptions, fetchCpaApiKeys, fetchStatus, fetchUpdateCheck, fetchUsageEventModelFilterOptions, fetchUsageEventSourceFilterOptions, fetchUsageEvents, logout, markStatusActive, updateCpaApiKeyAlias } from '@/lib/api';
-import type { AnalysisResponse, CpaApiKeyOption, CpaApiKeySettingsItem, StatusResponse, UsageEvent, UsageSourceFilterOption } from '@/lib/types';
+import { ApiError, fetchAnalysis, fetchCpaApiKeyOptions, fetchCpaApiKeySettings, fetchStatus, fetchUpdateCheck, fetchUsageEventModelFilterOptions, fetchUsageEventSourceFilterOptions, fetchUsageEvents, logout, markStatusActive, updateCpaApiKeyAlias } from '@/lib/api';
+import type { AnalysisResponse, CpaApiKeyOption, CpaApiKeySettingsItem, OverviewRealtimeWindow, StatusResponse, UsageEvent, UsageSourceFilterOption } from '@/lib/types';
 import { LoadingSpinner } from '@/components/ui/LoadingSpinner';
 import { LanguageSwitcher } from '@/components/ui/LanguageSwitcher';
 import { Select } from '@/components/ui/Select';
@@ -28,21 +11,18 @@ import { useHeaderRefresh } from '@/hooks/useHeaderRefresh';
 import { useThemeStore } from '@/stores';
 import {
   StatCards,
-  UsageChart,
-  ChartLineSelector,
+  OverviewRealtimePanel,
   AnalysisPanel,
   ApiKeySettingsCard,
   PriceSettingsCard,
   AuthFileCredentialsSection,
   AiProviderCredentialsSection,
   CredentialProviderFilterBar,
-  TokenBreakdownChart,
-  CostTrendChart,
   ServiceHealthCard,
   useUsageData,
+  useOverviewRealtimeData,
   usePricingData,
   useSparklines,
-  useChartData,
   useCredentialsTabData
 } from '@/components/usage';
 import {
@@ -53,41 +33,19 @@ import {
 } from '@/components/usage/RequestEventsDetailsCard';
 import { buildUsageRangeQuery } from '@/utils/usage/rangeQuery';
 import {
-  getOverviewModelNames,
-  resolveUsageFilterWindow,
-  sanitizeChartLines,
-  type UsageFilterWindow,
   type UsageTimeRange
 } from '@/utils/usage';
 import type { Theme } from '@/types';
 import { BrandLink } from '@/components/BrandLink';
 import styles from './UsagePage.module.scss';
 
-ChartJS.register(
-  CategoryScale,
-  LinearScale,
-  LogarithmicScale,
-  PointElement,
-  LineElement,
-  LineController,
-  ScatterController,
-  BarElement,
-  BarController,
-  ArcElement,
-  Title,
-  Tooltip,
-  Legend,
-  Filler
-);
-
-const CHART_LINES_STORAGE_KEY = 'cli-proxy-usage-chart-lines-v1';
 const TIME_RANGE_STORAGE_KEY = 'cli-proxy-usage-time-range-v1';
 const CUSTOM_TIME_RANGE_STORAGE_KEY = 'cli-proxy-usage-custom-range-v1';
+const OVERVIEW_REALTIME_WINDOW_STORAGE_KEY = 'cli-proxy-usage-overview-realtime-window-v1';
 export const REQUEST_EVENTS_PREFERENCES_STORAGE_KEY = 'cli-proxy-usage-request-events-preferences-v1';
-const DEFAULT_CHART_LINES = ['all'];
 const DEFAULT_TIME_RANGE: UsageTimeRange = '8h';
+const DEFAULT_REALTIME_WINDOW: OverviewRealtimeWindow = '15m';
 const DEFAULT_CUSTOM_WINDOW_HOURS = 8;
-const MAX_CHART_LINES = 9;
 const TIME_RANGE_OPTIONS: ReadonlyArray<{ value: UsageTimeRange; labelKey: string }> = [
   { value: '4h', labelKey: 'usage_stats.range_4h' },
   { value: '8h', labelKey: 'usage_stats.range_8h' },
@@ -99,14 +57,6 @@ const TIME_RANGE_OPTIONS: ReadonlyArray<{ value: UsageTimeRange; labelKey: strin
   { value: '30d', labelKey: 'usage_stats.range_30d' },
   { value: 'custom', labelKey: 'usage_stats.range_custom' },
 ];
-const HOUR_WINDOW_BY_TIME_RANGE: Record<Extract<UsageTimeRange, '4h' | '8h' | '12h' | '24h' | '7d' | '30d'>, number> = {
-  '4h': 4,
-  '8h': 8,
-  '12h': 12,
-  '24h': 24,
-  '7d': 7 * 24,
-  '30d': 30 * 24
-};
 const THEME_OPTIONS: ReadonlyArray<{ value: Theme; labelKey: string }> = [
   { value: 'white', labelKey: 'usage_stats.theme_light' },
   { value: 'dark', labelKey: 'usage_stats.theme_dark' },
@@ -129,6 +79,7 @@ const REQUEST_EVENTS_PAGE_SIZES = [20, 50, 100, 500, 1000] as const;
 const REQUEST_EVENTS_DEFAULT_PAGE_SIZE = 100;
 const ALL_REQUEST_EVENTS_FILTER = '__all__';
 const OVERVIEW_AUTO_REFRESH_INTERVAL_MS = 10_000;
+export const CUSTOM_DATE_RANGE_BOUNDS_REFRESH_INTERVAL_MS = 60_000;
 export const STATUS_ACTIVE_HEARTBEAT_INTERVAL_MS = 30_000;
 const CPA_MANAGEMENT_PAGE = 'management.html';
 const ABSOLUTE_HTTP_URL_PATTERN = /^https?:\/\//i;
@@ -195,7 +146,9 @@ export const getBackToCPALinkURL = (
   }
 };
 
-export const getUpdateCheckToastDuration = (kind: 'success' | 'info' | 'error') => (kind === 'error' ? 6_000 : 4_000);
+type TopNoticeKind = 'success' | 'info' | 'error';
+
+export const getUpdateCheckToastDuration = (kind: TopNoticeKind) => (kind === 'error' ? 6_000 : 4_000);
 
 export const shouldAutoRefreshUsageTab = ({
   activeTab,
@@ -333,7 +286,23 @@ type OverviewAutoRefreshDocument = Pick<Document, 'visibilityState' | 'addEventL
 type OverviewAutoRefreshOptions = {
   enabled: boolean;
   refreshOverview: () => void | Promise<void>;
+  onRefreshError?: (error: unknown) => void;
   documentRef?: OverviewAutoRefreshDocument;
+  intervalMs?: number;
+};
+
+type CustomDateRangeBoundsRefreshDocument = Pick<Document, 'visibilityState' | 'addEventListener' | 'removeEventListener'>;
+
+type CustomDateRangeBoundsRefreshTimerTarget = {
+  setInterval: (handler: () => void, timeout: number) => number;
+  clearInterval: (handle: number) => void;
+};
+
+type CustomDateRangeBoundsRefreshOptions = {
+  enabled: boolean;
+  refreshBoundsAnchor: () => void;
+  documentRef?: CustomDateRangeBoundsRefreshDocument;
+  timerTarget?: CustomDateRangeBoundsRefreshTimerTarget;
   intervalMs?: number;
 };
 
@@ -364,6 +333,7 @@ export const getOverviewDisplayLoading = ({ loading, hasUsage }: { loading: bool
 export const scheduleOverviewAutoRefresh = ({
   enabled,
   refreshOverview,
+  onRefreshError,
   documentRef,
   intervalMs = OVERVIEW_AUTO_REFRESH_INTERVAL_MS,
 }: OverviewAutoRefreshOptions) => {
@@ -382,12 +352,17 @@ export const scheduleOverviewAutoRefresh = ({
     clearInterval(timer);
     timer = undefined;
   };
+  const runRefresh = () => {
+    Promise.resolve(refreshOverview()).catch((error: unknown) => {
+      onRefreshError?.(error);
+    });
+  };
   const refreshIfVisible = () => {
     if (targetDocument.visibilityState === 'hidden') {
       stopTimer();
       return;
     }
-    void refreshOverview();
+    runRefresh();
   };
   const startTimer = () => {
     if (timer !== undefined) return;
@@ -398,7 +373,7 @@ export const scheduleOverviewAutoRefresh = ({
       stopTimer();
       return;
     }
-    void refreshOverview();
+    runRefresh();
     stopTimer();
     startTimer();
   };
@@ -411,6 +386,46 @@ export const scheduleOverviewAutoRefresh = ({
   return () => {
     stopTimer();
     targetDocument.removeEventListener('visibilitychange', handleVisibilityChange);
+  };
+};
+
+export const scheduleCustomDateRangeBoundsRefresh = ({
+  enabled,
+  refreshBoundsAnchor,
+  documentRef,
+  timerTarget,
+  intervalMs = CUSTOM_DATE_RANGE_BOUNDS_REFRESH_INTERVAL_MS,
+}: CustomDateRangeBoundsRefreshOptions) => {
+  if (!enabled) {
+    return () => undefined;
+  }
+
+  const targetDocument = documentRef ?? (typeof document === 'undefined' ? undefined : document);
+  const timers = timerTarget ?? (typeof window === 'undefined' ? undefined : {
+    setInterval: window.setInterval.bind(window),
+    clearInterval: window.clearInterval.bind(window),
+  });
+  if (!timers) {
+    return () => undefined;
+  }
+
+  let active = true;
+  const refreshIfVisible = () => {
+    if (!active || !isUsagePageVisible(targetDocument)) return;
+    refreshBoundsAnchor();
+  };
+  const handleVisibilityChange = () => {
+    refreshIfVisible();
+  };
+
+  refreshIfVisible();
+  const timer = timers.setInterval(refreshIfVisible, intervalMs);
+  targetDocument?.addEventListener('visibilitychange', handleVisibilityChange);
+
+  return () => {
+    active = false;
+    timers.clearInterval(timer);
+    targetDocument?.removeEventListener('visibilitychange', handleVisibilityChange);
   };
 };
 
@@ -581,6 +596,21 @@ export const isCustomDateWithinBounds = (value: string, bounds: { min: string; m
   value === '' || (value >= bounds.min && value <= bounds.max)
 );
 
+const clampCustomDateValueToBounds = (value: string, bounds: { min: string; max: string }) => {
+  if (value === '') return value;
+  if (value < bounds.min) return bounds.min;
+  if (value > bounds.max) return bounds.max;
+  return value;
+};
+
+export const clampCustomDateRangeToBounds = (
+  range: { start: string; end: string },
+  bounds: { min: string; max: string },
+) => ({
+  start: clampCustomDateValueToBounds(range.start, bounds),
+  end: clampCustomDateValueToBounds(range.end, bounds),
+});
+
 export const openDateInputPicker = (input: HTMLInputElement) => {
   try {
     input.showPicker?.();
@@ -645,35 +675,6 @@ const loadCustomTimeRange = () => {
   }
 };
 
-const normalizeChartLines = (value: unknown, maxLines = MAX_CHART_LINES): string[] => {
-  if (!Array.isArray(value)) {
-    return DEFAULT_CHART_LINES;
-  }
-
-  const filtered = value
-    .filter((item): item is string => typeof item === 'string')
-    .map((item) => item.trim())
-    .filter(Boolean)
-    .slice(0, maxLines);
-
-  return filtered.length ? filtered : DEFAULT_CHART_LINES;
-};
-
-const loadChartLines = (): string[] => {
-  try {
-    if (typeof localStorage === 'undefined') {
-      return DEFAULT_CHART_LINES;
-    }
-    const raw = localStorage.getItem(CHART_LINES_STORAGE_KEY);
-    if (!raw) {
-      return DEFAULT_CHART_LINES;
-    }
-    return normalizeChartLines(JSON.parse(raw));
-  } catch {
-    return DEFAULT_CHART_LINES;
-  }
-};
-
 const loadTimeRange = (): UsageTimeRange => {
   try {
     if (typeof localStorage === 'undefined') {
@@ -711,40 +712,6 @@ export const getTimeRangeOptions = (translate: Translate) =>
     label: translate(option.labelKey),
   }));
 
-const isTodayTimeRange = (value: UsageTimeRange): value is 'today' => value === 'today';
-const isYesterdayTimeRange = (value: UsageTimeRange): value is 'yesterday' => value === 'yesterday';
-
-export const getOverviewHourWindowHours = ({ timeRange, filterWindow }: { timeRange: UsageTimeRange; filterWindow: UsageFilterWindow }) => {
-  if (isTodayTimeRange(timeRange) || isYesterdayTimeRange(timeRange)) return 24;
-  if (timeRange !== 'custom') return Math.min(HOUR_WINDOW_BY_TIME_RANGE[timeRange], 24);
-  if (filterWindow.windowMinutes === undefined) return 24;
-  return Math.min(Math.max(Math.ceil(filterWindow.windowMinutes / 60), 1), 24);
-};
-
-export const getPreferredOverviewChartPeriod = ({ windowMinutes }: { windowMinutes?: number }): 'hour' | 'day' => (
-  windowMinutes !== undefined && windowMinutes > 24 * 60 ? 'day' : 'hour'
-);
-
-const toTimestampMs = (value: string | undefined): number | undefined => {
-  if (!value) return undefined;
-  const timestamp = Date.parse(value);
-  return Number.isFinite(timestamp) ? timestamp : undefined;
-};
-
-export const getOverviewChartEndMs = ({ timeRange, filterWindow, fallbackEndMs, resolvedRangeStartMs, resolvedRangeEndMs }: { timeRange: UsageTimeRange; filterWindow: UsageFilterWindow; fallbackEndMs: number; resolvedRangeStartMs?: number; resolvedRangeEndMs?: number }) => {
-  if (isTodayTimeRange(timeRange)) {
-    const startMs = resolvedRangeStartMs ?? filterWindow.startMs;
-    if (startMs !== undefined) {
-      return startMs + 24 * 60 * 60 * 1000;
-    }
-  }
-  if (isYesterdayTimeRange(timeRange) && resolvedRangeEndMs !== undefined) {
-    return Math.ceil((resolvedRangeEndMs + 1) / (60 * 60 * 1000)) * 60 * 60 * 1000;
-  }
-  if (resolvedRangeEndMs !== undefined) return resolvedRangeEndMs;
-  return filterWindow.endMs ?? fallbackEndMs;
-};
-
 const loadUsageTab = (): UsageTab => {
   try {
     if (typeof localStorage === 'undefined') {
@@ -757,6 +724,22 @@ const loadUsageTab = (): UsageTab => {
   }
 };
 
+const isOverviewRealtimeWindow = (value: unknown): value is OverviewRealtimeWindow => (
+  value === '15m' || value === '30m' || value === '60m'
+);
+
+const loadRealtimeWindow = (): OverviewRealtimeWindow => {
+  try {
+    if (typeof localStorage === 'undefined') {
+      return DEFAULT_REALTIME_WINDOW;
+    }
+    const raw = localStorage.getItem(OVERVIEW_REALTIME_WINDOW_STORAGE_KEY);
+    return isOverviewRealtimeWindow(raw) ? raw : DEFAULT_REALTIME_WINDOW;
+  } catch {
+    return DEFAULT_REALTIME_WINDOW;
+  }
+};
+
 export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
   const { t } = useTranslation();
   const isMobile = useMediaQuery('(max-width: 768px)');
@@ -765,14 +748,20 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
   const setTheme = useThemeStore((state) => state.setTheme);
   const isDark = resolvedTheme === 'dark';
   const [activeTab, setActiveTab] = useState<UsageTab>(loadUsageTab);
-  const [chartLines, setChartLines] = useState<string[]>(loadChartLines);
   const [timeRange, setTimeRange] = useState<UsageTimeRange>(loadTimeRange);
+  const [realtimeWindow, setRealtimeWindow] = useState<OverviewRealtimeWindow>(loadRealtimeWindow);
   const [customTimeRange, setCustomTimeRange] = useState<{ start: string; end: string }>(loadCustomTimeRange);
   const [selectedApiKeyId, setSelectedApiKeyId] = useState('');
   const [apiKeyOptions, setApiKeyOptions] = useState<CpaApiKeyOption[]>([]);
+  const [status, setStatus] = useState<StatusResponse | null>(null);
+  const [customDateRangeAnchorMs, setCustomDateRangeAnchorMs] = useState(() => Date.now());
   const apiKeyOptionsRequestControllerRef = useRef<AbortController | null>(null);
-  const isOverviewTab = activeTab === 'overview';
   const credentialSectionVisibility = getCredentialSectionVisibility(activeTab);
+  const customDateRangeBounds = useMemo(() => getCustomDateRangeBounds(customDateRangeAnchorMs, status?.timezone), [customDateRangeAnchorMs, status?.timezone]);
+  const effectiveCustomTimeRange = useMemo(
+    () => clampCustomDateRangeToBounds(customTimeRange, customDateRangeBounds),
+    [customDateRangeBounds, customTimeRange],
+  );
 
   const {
     usage,
@@ -783,10 +772,21 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
   } = useUsageData({
     onAuthRequired,
     range: timeRange,
-    customStart: customTimeRange.start,
-    customEnd: customTimeRange.end,
+    customStart: effectiveCustomTimeRange.start,
+    customEnd: effectiveCustomTimeRange.end,
     enabled: activeTab === 'overview',
     apiKeyId: selectedApiKeyId,
+  });
+  const {
+    realtime: currentRealtime,
+    loading: realtimeLoading,
+    error: realtimeError,
+    loadRealtime
+  } = useOverviewRealtimeData({
+    onAuthRequired,
+    enabled: activeTab === 'overview',
+    apiKeyId: selectedApiKeyId,
+    realtimeWindow,
   });
   const {
     modelNames,
@@ -795,6 +795,8 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
     error: pricingError,
     loadPricing,
     setModelPrices,
+    syncModelPrices,
+    previewPricingSync,
   } = usePricingData({
     onAuthRequired,
     enabled: activeTab === 'settings',
@@ -804,13 +806,12 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
   const [apiKeySettingsError, setApiKeySettingsError] = useState('');
   const [apiKeySettingsSavingId, setApiKeySettingsSavingId] = useState<string | null>(null);
   const apiKeySettingsRequestControllerRef = useRef<AbortController | null>(null);
-  const [status, setStatus] = useState<StatusResponse | null>(null);
   const [statusError, setStatusError] = useState('');
   const [updateCheckLoading, setUpdateCheckLoading] = useState(false);
-  const [updateCheckNotice, setUpdateCheckNotice] = useState<{ kind: 'success' | 'info' | 'error'; message: string } | null>(null);
+  const [topNotice, setTopNotice] = useState<{ kind: TopNoticeKind; message: string } | null>(null);
   const [hasNewVersion, setHasNewVersion] = useState(false);
   const [loggingOut, setLoggingOut] = useState(false);
-  const updateCheckNoticeTimerRef = useRef<ReturnType<typeof window.setTimeout> | null>(null);
+  const topNoticeTimerRef = useRef<ReturnType<typeof window.setTimeout> | null>(null);
   const [customRangeError, setCustomRangeError] = useState('');
   const [customRangeHint, setCustomRangeHint] = useState('');
   const [initialRequestEventsPreferences] = useState(loadRequestEventsPreferences);
@@ -832,11 +833,22 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
   const eventsFilterOptionsRequestControllerRef = useRef<AbortController | null>(null);
   const [manualRefreshLoading, setManualRefreshLoading] = useState(false);
   const [pageVisible, setPageVisible] = useState(isUsagePageVisible);
+  const showTopNotice = useCallback((kind: TopNoticeKind, message: string) => {
+    if (topNoticeTimerRef.current !== null) {
+      window.clearTimeout(topNoticeTimerRef.current);
+    }
+    setTopNotice({ kind, message });
+    topNoticeTimerRef.current = window.setTimeout(() => {
+      setTopNotice(null);
+      topNoticeTimerRef.current = null;
+    }, getUpdateCheckToastDuration(kind));
+  }, []);
   const credentialsData = useCredentialsTabData({
     enabledAuthFiles: credentialSectionVisibility.showAuthFiles && pageVisible,
     enabledAiProviders: credentialSectionVisibility.showAiProvider && pageVisible,
     quotaAutoRefreshEnabled: status?.quotaAutoRefreshEnabled === true,
     onAuthRequired,
+    onNotice: showTopNotice,
   });
   const refreshCredentials = credentialsData.refresh;
   const [analysisLoading, setAnalysisLoading] = useState(false);
@@ -870,25 +882,12 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
       })),
     [t]
   );
-  const updateCheckToastClassName = updateCheckNotice ? (() => {
-    if (updateCheckNotice.kind === 'error') return styles.updateCheckToastError;
-    if (updateCheckNotice.kind === 'success') return styles.updateCheckToastSuccess;
+  const topNoticeToastClassName = topNotice ? (() => {
+    if (topNotice.kind === 'error') return styles.updateCheckToastError;
+    if (topNotice.kind === 'success') return styles.updateCheckToastSuccess;
     return styles.updateCheckToastInfo;
   })() : '';
   const cpaManagementURL = useMemo(() => getBackToCPALinkURL(status), [status]);
-
-  const resolvedRangeStartMs = toTimestampMs(usage?.range_start);
-  const resolvedRangeEndMs = toTimestampMs(usage?.range_end);
-  const filterWindow = useMemo<UsageFilterWindow>(() => {
-    if (!usage) return {};
-    return resolveUsageFilterWindow(usage.usage, timeRange, {
-      nowMs: resolvedRangeEndMs ?? lastRefreshedAt?.getTime() ?? Date.now(),
-      customStart:
-        timeRange === 'custom' ? (resolvedRangeStartMs ?? parseCustomDateStart(customTimeRange.start)) : customTimeRange.start,
-      customEnd:
-        timeRange === 'custom' ? (resolvedRangeEndMs ?? parseCustomDateEnd(customTimeRange.end)) : customTimeRange.end
-    });
-  }, [customTimeRange.end, customTimeRange.start, lastRefreshedAt, resolvedRangeEndMs, resolvedRangeStartMs, timeRange, usage]);
 
   useEffect(() => {
     if (timeRange !== 'custom') {
@@ -947,7 +946,7 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
     setApiKeySettingsLoading(true);
     setApiKeySettingsError('');
     try {
-      const response = await fetchCpaApiKeys(controller.signal);
+      const response = await fetchCpaApiKeySettings(controller.signal);
       if (apiKeySettingsRequestControllerRef.current !== controller) {
         return;
       }
@@ -977,21 +976,27 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
     setApiKeySettingsError('');
     try {
       const updated = await updateCpaApiKeyAlias(id, keyAlias);
-      setApiKeySettings((current) => current.map((item) => (item.id === updated.id ? updated : item)));
+      setApiKeySettings((current) => current.map((item) => (item.id === updated.id ? { ...item, ...updated } : item)));
       setApiKeyOptions((current) => current.map((item) => (item.id === updated.id ? updated : item)));
+      showTopNotice('success', t('usage_stats.api_key_settings_alias_save_success'));
     } catch (error) {
       if (error instanceof ApiError && error.status === 401) {
         onAuthRequired?.();
         return;
       }
       setApiKeySettingsError(error instanceof Error ? error.message : 'Failed to update CPA API key alias');
+      showTopNotice('error', t('usage_stats.api_key_settings_alias_save_failed'));
     } finally {
       setApiKeySettingsSavingId(null);
     }
-  }, [onAuthRequired]);
+  }, [onAuthRequired, showTopNotice, t]);
 
   const loadAnalysis = useCallback(async () => {
-    const queryWindow = buildUsageRangeQuery({ range: timeRange, customStart: customTimeRange.start, customEnd: customTimeRange.end });
+    const queryWindow = buildUsageRangeQuery({
+      range: timeRange,
+      customStart: effectiveCustomTimeRange.start,
+      customEnd: effectiveCustomTimeRange.end,
+    });
     if (!queryWindow.valid) {
       analysisRequestControllerRef.current?.abort();
       analysisRequestControllerRef.current = null;
@@ -1033,24 +1038,8 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
         analysisRequestControllerRef.current = null;
       }
     }
-  }, [customTimeRange.end, customTimeRange.start, onAuthRequired, selectedApiKeyId, timeRange]);
-  const hourWindowHours = useMemo(
-    () => getOverviewHourWindowHours({ timeRange, filterWindow }),
-    [filterWindow, timeRange]
-  );
-  const filterWindowEndMs = getOverviewChartEndMs({
-    timeRange,
-    filterWindow,
-    fallbackEndMs: lastRefreshedAt?.getTime() ?? Date.now(),
-    resolvedRangeStartMs,
-    resolvedRangeEndMs,
-  });
-  const includeFinalHourBucket = isTodayTimeRange(timeRange) || isYesterdayTimeRange(timeRange);
-  const preferredOverviewChartPeriod = getPreferredOverviewChartPeriod({
-    windowMinutes: filterWindow.windowMinutes,
-  });
+  }, [effectiveCustomTimeRange.end, effectiveCustomTimeRange.start, onAuthRequired, selectedApiKeyId, timeRange]);
   const isCustomRange = timeRange === 'custom';
-  const customDateRangeBounds = useMemo(() => getCustomDateRangeBounds(Date.now(), status?.timezone), [status?.timezone]);
   const handleCustomDateInputKeyDown = useCallback((event: KeyboardEvent<HTMLInputElement>) => {
     if (event.key === 'Tab') return;
     event.preventDefault();
@@ -1060,20 +1049,13 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
     openDateInputPicker(event.currentTarget);
   }, []);
 
-  const handleChartLinesChange = useCallback((lines: string[]) => {
-    setChartLines(normalizeChartLines(lines));
-  }, []);
-
   useEffect(() => {
-    try {
-      if (typeof localStorage === 'undefined') {
-        return;
-      }
-      localStorage.setItem(CHART_LINES_STORAGE_KEY, JSON.stringify(chartLines));
-    } catch {
-      // Ignore storage errors.
-    }
-  }, [chartLines]);
+    setCustomTimeRange((current) => {
+      const next = clampCustomDateRangeToBounds(current, customDateRangeBounds);
+      if (next.start === current.start && next.end === current.end) return current;
+      return next;
+    });
+  }, [customDateRangeBounds]);
 
   useEffect(() => {
     try {
@@ -1085,6 +1067,17 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
       // Ignore storage errors.
     }
   }, [timeRange]);
+
+  useEffect(() => {
+    try {
+      if (typeof localStorage === 'undefined') {
+        return;
+      }
+      localStorage.setItem(OVERVIEW_REALTIME_WINDOW_STORAGE_KEY, realtimeWindow);
+    } catch {
+      // Ignore storage errors.
+    }
+  }, [realtimeWindow]);
 
   useEffect(() => {
     try {
@@ -1132,6 +1125,11 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
     setCustomTimeRange(buildDefaultCustomRange(anchorMs));
   }, [customTimeRange.end, customTimeRange.start, lastRefreshedAt, timeRange]);
 
+  useEffect(() => scheduleCustomDateRangeBoundsRefresh({
+    enabled: timeRange === 'custom',
+    refreshBoundsAnchor: () => setCustomDateRangeAnchorMs(Date.now()),
+  }), [timeRange]);
+
   useEffect(() => {
     // Credentials 列表、quota cache 和 task polling 都跟页面可见性绑定，隐藏页不保持续约或轮询。
     const syncPageVisible = () => setPageVisible(isUsagePageVisible());
@@ -1177,16 +1175,20 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
   }, [status]);
 
   useEffect(() => () => {
-    if (updateCheckNoticeTimerRef.current !== null) {
-      window.clearTimeout(updateCheckNoticeTimerRef.current);
-      updateCheckNoticeTimerRef.current = null;
+    if (topNoticeTimerRef.current !== null) {
+      window.clearTimeout(topNoticeTimerRef.current);
+      topNoticeTimerRef.current = null;
     }
   }, []);
 
   const getEventQueryWindow = useCallback(() => {
-    const query = buildUsageRangeQuery({ range: timeRange, customStart: customTimeRange.start, customEnd: customTimeRange.end });
+    const query = buildUsageRangeQuery({
+      range: timeRange,
+      customStart: effectiveCustomTimeRange.start,
+      customEnd: effectiveCustomTimeRange.end,
+    });
     return { valid: query.valid, start: query.start, end: query.end };
-  }, [customTimeRange.end, customTimeRange.start, timeRange]);
+  }, [effectiveCustomTimeRange.end, effectiveCustomTimeRange.start, timeRange]);
 
   const loadEventFilterOptions = useCallback(async () => {
     eventsFilterOptionsRequestControllerRef.current?.abort();
@@ -1325,8 +1327,8 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
       await Promise.all([loadApiKeySettings(), loadPricing()]);
       return;
     }
-    await loadUsage();
-  }, [activeTab, credentialSectionVisibility.enabled, loadAnalysis, loadApiKeySettings, loadEventFilterOptions, loadEvents, loadPricing, loadUsage, refreshCredentials]);
+    await Promise.all([loadUsage(), loadRealtime()]);
+  }, [activeTab, credentialSectionVisibility.enabled, loadAnalysis, loadApiKeySettings, loadEventFilterOptions, loadEvents, loadPricing, loadRealtime, loadUsage, refreshCredentials]);
 
   const refreshAutoRefreshTab = useCallback(async () => {
     if (activeTab === 'events') {
@@ -1337,8 +1339,16 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
       await refreshCredentials();
       return;
     }
-    await loadUsage();
-  }, [activeTab, credentialSectionVisibility.enabled, loadEvents, loadUsage, refreshCredentials]);
+    await Promise.all([loadUsage(), loadRealtime()]);
+  }, [activeTab, credentialSectionVisibility.enabled, loadEvents, loadRealtime, loadUsage, refreshCredentials]);
+
+  const handleAutoRefreshError = useCallback((error: unknown) => {
+    if (error instanceof ApiError && error.status === 401) {
+      onAuthRequired?.();
+      return;
+    }
+    setStatusError(error instanceof Error ? error.message : 'REFRESH_FAILED');
+  }, [onAuthRequired]);
 
   const autoRefreshEnabled = shouldAutoRefreshUsageTab({
     activeTab,
@@ -1360,17 +1370,6 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
     }
   }, [onAuthRequired, refreshActiveTab]);
 
-  const showUpdateCheckNotice = useCallback((kind: 'success' | 'info' | 'error', message: string) => {
-    if (updateCheckNoticeTimerRef.current !== null) {
-      window.clearTimeout(updateCheckNoticeTimerRef.current);
-    }
-    setUpdateCheckNotice({ kind, message });
-    updateCheckNoticeTimerRef.current = window.setTimeout(() => {
-      setUpdateCheckNotice(null);
-      updateCheckNoticeTimerRef.current = null;
-    }, getUpdateCheckToastDuration(kind));
-  }, []);
-
   const handleLogout = useCallback(async () => {
     setLoggingOut(true);
     try {
@@ -1387,32 +1386,33 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
       const result = await fetchUpdateCheck();
       if (!result.canCompare) {
         setHasNewVersion(false);
-        showUpdateCheckNotice('info', t('usage_stats.update_check_dev_build'));
+        showTopNotice('info', t('usage_stats.update_check_dev_build'));
         return;
       }
       if (result.updateAvailable) {
         setHasNewVersion(true);
-        showUpdateCheckNotice('success', t('usage_stats.update_check_new_version', { version: result.latestVersion }));
+        showTopNotice('success', t('usage_stats.update_check_new_version', { version: result.latestVersion }));
         return;
       }
       setHasNewVersion(false);
-      showUpdateCheckNotice('info', t('usage_stats.update_check_latest'));
+      showTopNotice('info', t('usage_stats.update_check_latest'));
     } catch (error) {
       if (error instanceof ApiError && error.status === 401) {
         onAuthRequired?.();
         return;
       }
       setHasNewVersion(false);
-      showUpdateCheckNotice('error', t('usage_stats.update_check_failed'));
+      showTopNotice('error', t('usage_stats.update_check_failed'));
     } finally {
       setUpdateCheckLoading(false);
     }
-  }, [onAuthRequired, showUpdateCheckNotice, t]);
+  }, [onAuthRequired, showTopNotice, t]);
 
   useEffect(() => scheduleOverviewAutoRefresh({
     enabled: autoRefreshEnabled,
     refreshOverview: refreshAutoRefreshTab,
-  }), [autoRefreshEnabled, refreshAutoRefreshTab]);
+    onRefreshError: handleAutoRefreshError,
+  }), [autoRefreshEnabled, handleAutoRefreshError, refreshAutoRefreshTab]);
 
   useHeaderRefresh(refreshActiveTab);
 
@@ -1497,6 +1497,11 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
     return Number.isNaN(parsed.getTime()) ? null : parsed;
   }, [status?.last_run_at]);
   const displayStatusError = statusError === 'REFRESH_FAILED' ? t('notification.refresh_failed') : statusError;
+  const displayRealtimeError = realtimeError
+    ? realtimeError === 'AUTH_REQUIRED'
+      ? t('auth.session_expired')
+      : t('usage_stats.overview_realtime_load_failed')
+    : '';
   // 只有需要时间范围的 tab 才渲染 Range 控件，避免 Credentials/Pricing 产生空白占位。
   const showRangeControls = shouldShowRangeControls(activeTab);
   const {
@@ -1508,39 +1513,6 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
     costSparkline
   } = useSparklines({ usage, loading });
 
-  const {
-    requestsPeriod,
-    tokensPeriod,
-    requestsChartData,
-    tokensChartData,
-    requestsChartOptions,
-    tokensChartOptions
-  } = useChartData({
-    usage,
-    chartLines,
-    isDark,
-    isMobile,
-    hourWindowHours,
-    endMs: filterWindowEndMs,
-    includeFinalHourBucket,
-    preferredPeriod: preferredOverviewChartPeriod,
-  });
-
-  const overviewModelNames = useMemo(
-    () => getOverviewModelNames(usage),
-    [usage]
-  );
-
-  useEffect(() => {
-    if (!isOverviewTab) return;
-    setChartLines((current) => {
-      const next = sanitizeChartLines(current, overviewModelNames);
-      if (next.length === current.length && next.every((line, index) => line === current[index])) {
-        return current;
-      }
-      return next;
-    });
-  }, [isOverviewTab, overviewModelNames]);
   const overviewDisplayLoading = getOverviewDisplayLoading({ loading, hasUsage: Boolean(usage) });
 
   return (
@@ -1646,22 +1618,22 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
               </div>
             )}
 
-            {updateCheckNotice && (
+            {topNotice && (
               <div
-                className={`${styles.updateCheckToast} ${updateCheckToastClassName}`.trim()}
+                className={`${styles.updateCheckToast} ${topNoticeToastClassName}`.trim()}
                 role="status"
                 aria-live="polite"
               >
-                <span className={styles.updateCheckToastMessage}>{updateCheckNotice.message}</span>
+                <span className={styles.updateCheckToastMessage}>{topNotice.message}</span>
                 <button
                   type="button"
                   className={styles.updateCheckToastClose}
                   onClick={() => {
-                    if (updateCheckNoticeTimerRef.current !== null) {
-                      window.clearTimeout(updateCheckNoticeTimerRef.current);
-                      updateCheckNoticeTimerRef.current = null;
+                    if (topNoticeTimerRef.current !== null) {
+                      window.clearTimeout(topNoticeTimerRef.current);
+                      topNoticeTimerRef.current = null;
                     }
-                    setUpdateCheckNotice(null);
+                    setTopNotice(null);
                   }}
                 >
                   {t('usage_stats.dismiss_notice')}
@@ -1837,55 +1809,16 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
 
                 <ServiceHealthCard usage={usage} loading={overviewDisplayLoading} />
 
-                <TokenBreakdownChart
-                  usage={usage}
-                  loading={overviewDisplayLoading}
+                <OverviewRealtimePanel
+                  realtime={currentRealtime ?? undefined}
+                  loading={realtimeLoading}
+                  error={displayRealtimeError}
+                  window={realtimeWindow}
+                  onWindowChange={setRealtimeWindow}
                   isDark={isDark}
                   isMobile={isMobile}
-                  hourWindowHours={hourWindowHours}
-                  endMs={filterWindowEndMs}
-                  includeFinalHourBucket={includeFinalHourBucket}
-                  preferredPeriod={preferredOverviewChartPeriod}
+                  timezone={currentRealtime?.timezone ?? usage?.timezone}
                 />
-
-                <CostTrendChart
-                  usage={usage}
-                  loading={overviewDisplayLoading}
-                  isDark={isDark}
-                  isMobile={isMobile}
-                  hourWindowHours={hourWindowHours}
-                  endMs={filterWindowEndMs}
-                  includeFinalHourBucket={includeFinalHourBucket}
-                  preferredPeriod={preferredOverviewChartPeriod}
-                />
-
-                <ChartLineSelector
-                  chartLines={chartLines}
-                  modelNames={overviewModelNames}
-                  maxLines={MAX_CHART_LINES}
-                  onChange={handleChartLinesChange}
-                />
-
-                <div className={styles.chartsGrid}>
-                  <UsageChart
-                    title={t('usage_stats.requests_trend')}
-                    period={requestsPeriod}
-                    chartData={requestsChartData}
-                    chartOptions={requestsChartOptions}
-                    loading={overviewDisplayLoading}
-                    isMobile={isMobile}
-                    emptyText={t('usage_stats.no_data')}
-                  />
-                  <UsageChart
-                    title={t('usage_stats.tokens_trend')}
-                    period={tokensPeriod}
-                    chartData={tokensChartData}
-                    chartOptions={tokensChartOptions}
-                    loading={overviewDisplayLoading}
-                    isMobile={isMobile}
-                    emptyText={t('usage_stats.no_data')}
-                  />
-                </div>
               </>
             )}
 
@@ -1956,8 +1889,10 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
                       onSortChange={credentialsData.setAuthFileSort}
                       onRefreshQuota={credentialsData.refreshQuotaForCurrentAuthFilePage}
                       onRefreshQuotaForAuthIndex={credentialsData.refreshQuotaForAuthIndex}
+                      onResetQuotaForAuthIndex={credentialsData.resetQuotaForAuthIndex}
                       onRefreshInspectionStatus={credentialsData.refreshQuotaInspectionStatus}
                       onStartInspection={credentialsData.startQuotaInspection}
+                      onAfterInvalidAccountAction={credentialsData.refresh}
                     />
                   )}
                   {credentialSectionVisibility.showAiProvider && (
@@ -1985,11 +1920,15 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
                   loading={apiKeySettingsLoading}
                   savingId={apiKeySettingsSavingId}
                   onSaveAlias={handleSaveApiKeyAlias}
+                  onNotice={showTopNotice}
                 />
                 <PriceSettingsCard
                   modelNames={modelNames}
                   modelPrices={modelPrices}
                   onPricesChange={setModelPrices}
+                  onSyncPricesChange={syncModelPrices}
+                  onSyncPreview={previewPricingSync}
+                  onNotice={showTopNotice}
                   loading={pricingLoading}
                 />
               </div>

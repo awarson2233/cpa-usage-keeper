@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"cpa-usage-keeper/internal/config"
-	"cpa-usage-keeper/internal/cpa"
 	"cpa-usage-keeper/internal/entities"
 	"github.com/sirupsen/logrus"
 	"gorm.io/gorm"
@@ -54,17 +53,24 @@ func TestOpenDatabaseCreatesFreshDatabaseFromCurrentSchemaWithoutRunningMigratio
 	if err := db.Table("schema_migrations").Count(&count).Error; err != nil {
 		t.Fatalf("count schema migrations: %v", err)
 	}
-	if count != 35 {
-		t.Fatalf("expected fresh database to mark 35 migrations applied, got %d", count)
+	if count != 38 {
+		t.Fatalf("expected fresh database to mark 38 migrations applied, got %d", count)
 	}
 	if strings.Contains(logs.String(), "schema migration started") {
 		t.Fatalf("expected fresh database creation not to run version migrations, got logs:\n%s", logs.String())
+	}
+	if !db.Migrator().HasColumn(&entities.RedisUsageInbox{}, "source") {
+		t.Fatal("expected redis_usage_inboxes.source column to exist")
+	}
+	if db.Migrator().HasColumn(&entities.RedisUsageInbox{}, "queue_key") {
+		t.Fatal("expected redis_usage_inboxes.queue_key column not to exist")
 	}
 	for _, indexName := range []string{
 		"idx_usage_events_api_group_key",
 		"idx_usage_events_auth_index",
 		"idx_usage_events_model",
 		"idx_usage_events_auth_type_auth_index_id",
+		"idx_usage_events_auth_index_timestamp_id",
 		"uniq_usage_overview_hourly_stats_bucket_api_model_auth_alias",
 		"idx_usage_overview_hourly_stats_api_bucket",
 		"idx_usage_overview_hourly_stats_api_model_bucket",
@@ -81,7 +87,12 @@ func TestOpenDatabaseCreatesFreshDatabaseFromCurrentSchemaWithoutRunningMigratio
 		assertSQLiteIndexExists(t, db, indexName)
 	}
 	for _, indexName := range []string{
+		"idx_usage_events_api_group_key_timestamp_id",
+		"idx_usage_events_event_key",
+		"idx_usage_events_failed",
 		"idx_usage_events_source",
+		"idx_usage_events_provider",
+		"idx_usage_events_auth_type",
 		"idx_usage_events_auth_type_source_id",
 	} {
 		if repositorySQLiteIndexExists(t, db, indexName) {
@@ -351,7 +362,7 @@ func TestDatabaseTimeFieldsUseProjectTimezoneRFC3339Nano(t *testing.T) {
 	if _, err := UpsertModelPriceSetting(db, dto.ModelPriceSettingInput{Model: "claude-sonnet", PromptPricePer1M: 1}); err != nil {
 		t.Fatalf("UpsertModelPriceSetting returned error: %v", err)
 	}
-	inboxRows, err := InsertRedisUsageInboxMessages(db, []dto.RedisInboxInsert{{QueueKey: cpa.ManagementUsageQueueKey, RawMessage: `{"request_id":"event-storage-time"}`, PoppedAt: storageTime}})
+	inboxRows, err := InsertRedisUsageInboxMessages(db, []dto.RedisInboxInsert{{Source: testRedisInboxSource, RawMessage: `{"request_id":"event-storage-time"}`, PoppedAt: storageTime}})
 	if err != nil {
 		t.Fatalf("InsertRedisUsageInboxMessages returned error: %v", err)
 	}
@@ -414,8 +425,8 @@ func TestCleanupStorageCleansRedisInboxAndVacuums(t *testing.T) {
 	now := time.Date(2026, 4, 27, 2, 30, 0, 0, time.UTC)
 
 	inboxRows, err := InsertRedisUsageInboxMessages(db, []dto.RedisInboxInsert{
-		{QueueKey: cpa.ManagementUsageQueueKey, RawMessage: `{"request_id":"processed-old"}`, PoppedAt: now.AddDate(0, 0, -2)},
-		{QueueKey: cpa.ManagementUsageQueueKey, RawMessage: `{"request_id":"pending"}`, PoppedAt: now.AddDate(0, 0, -2)},
+		{Source: testRedisInboxSource, RawMessage: `{"request_id":"processed-old"}`, PoppedAt: now.AddDate(0, 0, -2)},
+		{Source: testRedisInboxSource, RawMessage: `{"request_id":"pending"}`, PoppedAt: now.AddDate(0, 0, -2)},
 	})
 	if err != nil {
 		t.Fatalf("InsertRedisUsageInboxMessages returned error: %v", err)
@@ -451,6 +462,122 @@ func TestCleanupStorageCleansRedisInboxAndVacuums(t *testing.T) {
 	}
 	if len(healthRemaining) != 1 || healthRemaining[0].APIGroupKey != "fresh" {
 		t.Fatalf("expected only fresh health stat row to remain, got %+v", healthRemaining)
+	}
+}
+
+func TestCleanupStorageCleansUsageEventsBeforePreviousMonthStart(t *testing.T) {
+	previousLocal := time.Local
+	location, err := time.LoadLocation("Asia/Shanghai")
+	if err != nil {
+		t.Fatalf("load location: %v", err)
+	}
+	time.Local = location
+	t.Cleanup(func() { time.Local = previousLocal })
+	db := openTestDatabase(t)
+	now := time.Date(2026, 6, 16, 9, 0, 0, 0, time.Local)
+
+	if _, _, err := InsertUsageEvents(db, []entities.UsageEvent{
+		{EventKey: "old", Model: "claude-sonnet", Timestamp: time.Date(2026, 4, 30, 23, 59, 59, 0, time.Local), TotalTokens: 1},
+		{EventKey: "boundary", Model: "claude-sonnet", Timestamp: time.Date(2026, 5, 1, 0, 0, 0, 0, time.Local), TotalTokens: 2},
+		{EventKey: "recent", Model: "claude-sonnet", Timestamp: time.Date(2026, 6, 16, 8, 0, 0, 0, time.Local), TotalTokens: 3},
+	}); err != nil {
+		t.Fatalf("InsertUsageEvents returned error: %v", err)
+	}
+	result, err := CleanupStorage(db, now)
+	if err != nil {
+		t.Fatalf("CleanupStorage returned error: %v", err)
+	}
+	if result.UsageEventsDeleted != 1 {
+		t.Fatalf("expected one old usage event to be deleted, got %+v", result)
+	}
+
+	var remainingKeys []string
+	if err := db.Model(&entities.UsageEvent{}).Order("event_key asc").Pluck("event_key", &remainingKeys).Error; err != nil {
+		t.Fatalf("load remaining usage events: %v", err)
+	}
+	expectedKeys := []string{"boundary", "recent"}
+	if fmt.Sprint(remainingKeys) != fmt.Sprint(expectedKeys) {
+		t.Fatalf("expected remaining usage events %v, got %v", expectedKeys, remainingKeys)
+	}
+}
+
+func TestCleanupStorageCleansUsageEventsWithoutOverviewCheckpointGuard(t *testing.T) {
+	db := openTestDatabase(t)
+	now := time.Date(2026, 6, 16, 9, 0, 0, 0, time.Local)
+
+	if _, _, err := InsertUsageEvents(db, []entities.UsageEvent{
+		{EventKey: "old-without-checkpoint", Model: "claude-sonnet", Timestamp: time.Date(2026, 4, 29, 10, 0, 0, 0, time.Local), TotalTokens: 1},
+		{EventKey: "old-beyond-checkpoint", Model: "claude-sonnet", Timestamp: time.Date(2026, 4, 30, 10, 0, 0, 0, time.Local), TotalTokens: 2},
+	}); err != nil {
+		t.Fatalf("InsertUsageEvents returned error: %v", err)
+	}
+	var first entities.UsageEvent
+	if err := db.Where("event_key = ?", "old-without-checkpoint").First(&first).Error; err != nil {
+		t.Fatalf("load first event: %v", err)
+	}
+	if err := db.Create(&entities.UsageOverviewAggregationCheckpoint{Name: usageOverviewAggregationCheckpointName, LastAggregatedUsageEventID: first.ID, CreatedAt: now, UpdatedAt: now}).Error; err != nil {
+		t.Fatalf("seed overview checkpoint: %v", err)
+	}
+
+	result, err := CleanupStorage(db, now)
+	if err != nil {
+		t.Fatalf("CleanupStorage returned error: %v", err)
+	}
+	if result.UsageEventsDeleted != 2 {
+		t.Fatalf("expected all expired usage events to be deleted, got %+v", result)
+	}
+
+	var remainingCount int64
+	if err := db.Model(&entities.UsageEvent{}).Count(&remainingCount).Error; err != nil {
+		t.Fatalf("count remaining usage events: %v", err)
+	}
+	if remainingCount != 0 {
+		t.Fatalf("expected no remaining expired usage events, got %d", remainingCount)
+	}
+}
+
+func TestCleanupStorageCleansUsageEventsWithoutIdentityCheckpointGuard(t *testing.T) {
+	db := openTestDatabase(t)
+	now := time.Date(2026, 6, 16, 9, 0, 0, 0, time.Local)
+
+	if _, _, err := InsertUsageEvents(db, []entities.UsageEvent{
+		{EventKey: "identity-aggregated-old", AuthType: "oauth", AuthIndex: "auth-1", Model: "claude-sonnet", Timestamp: time.Date(2026, 4, 29, 10, 0, 0, 0, time.Local), TotalTokens: 1},
+		{EventKey: "identity-pending-old", AuthType: "oauth", AuthIndex: "auth-1", Model: "claude-sonnet", Timestamp: time.Date(2026, 4, 30, 10, 0, 0, 0, time.Local), TotalTokens: 2},
+	}); err != nil {
+		t.Fatalf("InsertUsageEvents returned error: %v", err)
+	}
+	var events []entities.UsageEvent
+	if err := db.Order("id asc").Find(&events).Error; err != nil {
+		t.Fatalf("load usage events: %v", err)
+	}
+	if err := db.Create(&entities.UsageOverviewAggregationCheckpoint{Name: usageOverviewAggregationCheckpointName, LastAggregatedUsageEventID: events[1].ID, CreatedAt: now, UpdatedAt: now}).Error; err != nil {
+		t.Fatalf("seed overview checkpoint: %v", err)
+	}
+	if err := db.Create(&entities.UsageIdentity{
+		Name:                       "Auth 1",
+		AuthType:                   entities.UsageIdentityAuthTypeAuthFile,
+		Identity:                   "auth-1",
+		LastAggregatedUsageEventID: events[0].ID,
+		CreatedAt:                  now,
+		UpdatedAt:                  now,
+	}).Error; err != nil {
+		t.Fatalf("seed usage identity: %v", err)
+	}
+
+	result, err := CleanupStorage(db, now)
+	if err != nil {
+		t.Fatalf("CleanupStorage returned error: %v", err)
+	}
+	if result.UsageEventsDeleted != 2 {
+		t.Fatalf("expected all expired usage events to be deleted, got %+v", result)
+	}
+
+	var remainingCount int64
+	if err := db.Model(&entities.UsageEvent{}).Count(&remainingCount).Error; err != nil {
+		t.Fatalf("count remaining usage events: %v", err)
+	}
+	if remainingCount != 0 {
+		t.Fatalf("expected no remaining expired usage events, got %d", remainingCount)
 	}
 }
 

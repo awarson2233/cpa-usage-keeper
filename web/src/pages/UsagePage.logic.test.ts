@@ -1,7 +1,10 @@
+import { readFileSync } from 'node:fs';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { buildCustomDateRangeQuery, getBackToCPALinkURL, getCredentialSectionVisibility, getCustomDateRangeBounds, getOverviewChartEndMs, getOverviewDisplayLoading, getOverviewHourWindowHours, getPreferredOverviewChartPeriod, getTimeRangeOptions, getUsageTabOptions, isCustomDateWithinBounds, isUsagePageVisible, loadRequestEventsPreferences, normalizeRequestEventsPreferences, normalizeUsageTabValue, openDateInputPicker, refreshPageData, REQUEST_EVENTS_PREFERENCES_STORAGE_KEY, sanitizeRequestEventFilters, saveRequestEventsPreferences, scheduleOverviewAutoRefresh, scheduleStatusActiveHeartbeat, shouldAutoRefreshUsageTab, shouldShowApiKeyFilter, shouldShowRangeControls, shouldShowUpdateCheckButton, STATUS_ACTIVE_HEARTBEAT_INTERVAL_MS, getUpdateCheckToastDuration } from './UsagePage';
+import { buildCustomDateRangeQuery, clampCustomDateRangeToBounds, CUSTOM_DATE_RANGE_BOUNDS_REFRESH_INTERVAL_MS, getBackToCPALinkURL, getCredentialSectionVisibility, getCustomDateRangeBounds, getOverviewDisplayLoading, getTimeRangeOptions, getUsageTabOptions, isCustomDateWithinBounds, isUsagePageVisible, loadRequestEventsPreferences, normalizeRequestEventsPreferences, normalizeUsageTabValue, openDateInputPicker, refreshPageData, REQUEST_EVENTS_PREFERENCES_STORAGE_KEY, sanitizeRequestEventFilters, saveRequestEventsPreferences, scheduleCustomDateRangeBoundsRefresh, scheduleOverviewAutoRefresh, scheduleStatusActiveHeartbeat, shouldAutoRefreshUsageTab, shouldShowApiKeyFilter, shouldShowRangeControls, shouldShowUpdateCheckButton, STATUS_ACTIVE_HEARTBEAT_INTERVAL_MS, getUpdateCheckToastDuration } from './UsagePage';
 import { REQUEST_EVENT_COLUMN_IDS } from '@/components/usage/RequestEventsDetailsCard';
 import type { StatusResponse, UsageFilterWindow } from '@/lib/types';
+
+const usagePageSource = readFileSync(new URL('./UsagePage.tsx', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
 
 const createAutoRefreshTestDocument = (visibilityState: DocumentVisibilityState = 'visible') => {
   const target = new EventTarget();
@@ -107,6 +110,13 @@ describe('UsagePage update check controls', () => {
   });
 });
 
+describe('UsagePage credential reset notice wiring', () => {
+  it('passes the top notice handler into the credentials hook', () => {
+    expect(usagePageSource).toContain('onNotice: showTopNotice')
+    expect(usagePageSource).toMatch(/const showTopNotice = useCallback\([\s\S]*const credentialsData = useCredentialsTabData/)
+  })
+});
+
 describe('UsagePage Overview auto-refresh', () => {
   it('refreshes the Overview tab every 10 seconds', () => {
     vi.useFakeTimers();
@@ -159,6 +169,25 @@ describe('UsagePage Overview auto-refresh', () => {
     testDocument.dispatchEvent(new Event('visibilitychange'));
 
     expect(refreshOverview).toHaveBeenCalledTimes(1);
+
+    cleanup();
+  });
+
+  it('routes auto-refresh failures to the refresh error handler', async () => {
+    vi.useFakeTimers();
+    const testDocument = createAutoRefreshTestDocument();
+    const failure = new Error('refresh failed');
+    const refreshOverview = vi.fn(async () => {
+      throw failure;
+    });
+    const onRefreshError = vi.fn();
+
+    const cleanup = scheduleOverviewAutoRefresh({ enabled: true, refreshOverview, onRefreshError, documentRef: testDocument });
+
+    vi.advanceTimersByTime(10_000);
+    await flushPromises();
+
+    expect(onRefreshError).toHaveBeenCalledWith(failure);
 
     cleanup();
   });
@@ -338,6 +367,83 @@ describe('UsagePage status active heartbeat', () => {
     expect(capturedSignal?.aborted).toBe(true);
     expect(timerTarget.setInterval).not.toHaveBeenCalled();
     expect(timerTarget.clearInterval).not.toHaveBeenCalled();
+
+    cleanup();
+  });
+});
+
+describe('UsagePage Custom date range bounds refresh', () => {
+  it('refreshes the bounds anchor immediately and on the visible interval when Custom is active', () => {
+    let intervalHandler: (() => void) | undefined;
+    const testDocument = createAutoRefreshTestDocument();
+    const timerTarget = {
+      setInterval: vi.fn((handler: () => void, timeout: number) => {
+        intervalHandler = handler;
+        expect(timeout).toBe(CUSTOM_DATE_RANGE_BOUNDS_REFRESH_INTERVAL_MS);
+        return 11;
+      }),
+      clearInterval: vi.fn(),
+    };
+    const refreshBoundsAnchor = vi.fn();
+
+    const cleanup = scheduleCustomDateRangeBoundsRefresh({
+      enabled: true,
+      refreshBoundsAnchor,
+      documentRef: testDocument,
+      timerTarget,
+    });
+
+    expect(refreshBoundsAnchor).toHaveBeenCalledTimes(1);
+    intervalHandler?.();
+    expect(refreshBoundsAnchor).toHaveBeenCalledTimes(2);
+
+    cleanup();
+    intervalHandler?.();
+
+    expect(timerTarget.clearInterval).toHaveBeenCalledWith(11);
+    expect(refreshBoundsAnchor).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not refresh while Custom is inactive', () => {
+    const timerTarget = {
+      setInterval: vi.fn(() => 12),
+      clearInterval: vi.fn(),
+    };
+    const refreshBoundsAnchor = vi.fn();
+
+    const cleanup = scheduleCustomDateRangeBoundsRefresh({
+      enabled: false,
+      refreshBoundsAnchor,
+      timerTarget,
+    });
+
+    expect(refreshBoundsAnchor).not.toHaveBeenCalled();
+    expect(timerTarget.setInterval).not.toHaveBeenCalled();
+
+    cleanup();
+  });
+
+  it('refreshes when a hidden Custom page becomes visible again', () => {
+    const testDocument = createAutoRefreshTestDocument('hidden');
+    const timerTarget = {
+      setInterval: vi.fn(() => 13),
+      clearInterval: vi.fn(),
+    };
+    const refreshBoundsAnchor = vi.fn();
+
+    const cleanup = scheduleCustomDateRangeBoundsRefresh({
+      enabled: true,
+      refreshBoundsAnchor,
+      documentRef: testDocument,
+      timerTarget,
+    });
+
+    expect(refreshBoundsAnchor).not.toHaveBeenCalled();
+
+    testDocument.setVisibilityState('visible');
+    testDocument.dispatchEvent(new Event('visibilitychange'));
+
+    expect(refreshBoundsAnchor).toHaveBeenCalledTimes(1);
 
     cleanup();
   });
@@ -582,18 +688,6 @@ describe('UsagePage time range options', () => {
   });
 });
 
-describe('UsagePage Overview chart period preference', () => {
-  it('keeps sub-day windows on By Hour', () => {
-    expect(getPreferredOverviewChartPeriod({ windowMinutes: 12 * 60 })).toBe('hour');
-  });
-
-  it('uses By Day only for windows longer than one day without inspecting chart data', () => {
-    expect(getPreferredOverviewChartPeriod({ windowMinutes: 24 * 60 })).toBe('hour');
-    expect(getPreferredOverviewChartPeriod({ windowMinutes: (24 * 60) + 1 })).toBe('day');
-    expect(getPreferredOverviewChartPeriod({ windowMinutes: 30 * 24 * 60 })).toBe('day');
-  });
-});
-
 describe('UsagePage custom date input bounds', () => {
   it('limits selectable Custom dates to today through the first day of the previous month', () => {
     expect(getCustomDateRangeBounds(Date.parse('2026-05-13T12:00:00.000Z'), 'UTC')).toEqual({
@@ -616,6 +710,15 @@ describe('UsagePage custom date input bounds', () => {
     expect(isCustomDateWithinBounds('2026-04-01', bounds)).toBe(true);
     expect(isCustomDateWithinBounds('2026-05-14', bounds)).toBe(false);
     expect(isCustomDateWithinBounds('2026-03-31', bounds)).toBe(false);
+  });
+
+  it('clamps saved Custom dates to the moving bounds', () => {
+    const bounds = { min: '2026-05-01', max: '2026-06-16' };
+
+    expect(clampCustomDateRangeToBounds({ start: '2026-04-20', end: '2026-06-20' }, bounds)).toEqual({
+      start: '2026-05-01',
+      end: '2026-06-16',
+    });
   });
 
   it('opens the native date picker when the date field is activated', () => {
@@ -648,42 +751,6 @@ describe('UsagePage custom date query', () => {
       start: undefined,
       end: undefined,
     });
-  });
-});
-
-describe('UsagePage Overview chart window', () => {
-  it('uses backend Today range start instead of browser-local midnight for chart buckets', () => {
-    const filterWindow: UsageFilterWindow = {
-      startMs: Date.parse('2026-04-23T00:00:00.000Z'),
-      endMs: Date.parse('2026-04-23T12:34:56.000Z'),
-      windowMinutes: (12 * 60) + 34 + (56 / 60),
-    };
-
-    expect(getOverviewHourWindowHours({ timeRange: 'today', filterWindow })).toBe(24);
-    expect(getOverviewChartEndMs({
-      timeRange: 'today',
-      filterWindow,
-      fallbackEndMs: filterWindow.endMs ?? 0,
-      resolvedRangeStartMs: Date.parse('2026-04-22T16:00:00.000Z'),
-      resolvedRangeEndMs: Date.parse('2026-04-23T15:59:59.999Z'),
-    })).toBe(Date.parse('2026-04-23T16:00:00.000Z'));
-  });
-
-  it('uses Yesterday hourly chart buckets through the next day boundary', () => {
-    const filterWindow: UsageFilterWindow = {
-      startMs: Date.parse('2026-04-23T00:00:00.000Z'),
-      endMs: Date.parse('2026-04-23T23:59:59.999Z'),
-      windowMinutes: 24 * 60,
-    };
-    const resolvedRangeEndMs = Date.parse('2026-04-23T23:59:59.999Z');
-
-    expect(getOverviewHourWindowHours({ timeRange: 'yesterday', filterWindow })).toBe(24);
-    expect(getOverviewChartEndMs({
-      timeRange: 'yesterday',
-      filterWindow,
-      fallbackEndMs: Date.parse('2026-04-24T12:34:56.000Z'),
-      resolvedRangeEndMs,
-    })).toBe(Date.parse('2026-04-24T00:00:00.000Z'));
   });
 });
 

@@ -155,6 +155,32 @@ export function IconInfo({ size = 20, ...props }: IconProps) {
   );
 }
 
+export function IconCircleAlert({ size = 20, ...props }: IconProps) {
+  return (
+    <svg {...baseSvgProps} width={size} height={size} {...props}>
+      <circle cx="12" cy="12" r="10" />
+      <line x1="12" x2="12" y1="8" y2="12" />
+      <line x1="12" x2="12.01" y1="16" y2="16" />
+    </svg>
+  );
+}
+
+
+export function IconGaugeReset({ size = 20, ...props }: IconProps) {
+  return (
+    <svg {...baseSvgProps} width={size} height={size} {...props}>
+      <path d="M4.5 14.5a7.5 7.5 0 0 1 12.7-5.3" />
+      <path d="M17.2 9.2 15 7" />
+      <path d="M15 7h2.5V4.5" />
+      <path d="M12 14.5v-4.5" />
+      <path d="M12 14.5 8.5 11" />
+      <path d="M8.5 18.5h7" />
+      <path d="M10 18.5v-1.5" />
+      <path d="M14 18.5v-1.5" />
+    </svg>
+  );
+}
+
 export function IconRefreshCw({ size = 20, ...props }: IconProps) {
   return (
     <svg {...baseSvgProps} width={size} height={size} {...props}>

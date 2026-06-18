@@ -1,7 +1,11 @@
-import type { UsageIdentity, UsageQuotaRow } from '@/lib/types'
+import type { UsageCredentialHealth, UsageIdentity, UsageQuotaCheckResponse, UsageQuotaRow } from '@/lib/types'
 import { calculateCacheRate, formatCompactTokenValue } from '@/utils/usage'
 
 export const CREDENTIALS_PAGE_SIZE = 10
+const FIVE_HOUR_WINDOW_SECONDS = 5 * 60 * 60
+const WEEKLY_WINDOW_SECONDS = 7 * 24 * 60 * 60
+const THIRTY_DAY_WINDOW_SECONDS = 30 * 24 * 60 * 60
+const AVERAGE_MONTH_WINDOW_SECONDS = 365 * 24 * 60 * 60 / 12
 
 type QuotaStatus = 'ok' | 'warning' | 'danger' | 'unknown'
 export type PlanTypeTone = 'free' | 'team' | 'plus' | 'pro' | 'neutral'
@@ -52,10 +56,13 @@ export interface AuthFileCredentialRow {
   totalTokens: number
   cacheRate: number | null
   quota: UsageQuotaRow[]
+  quotaResetCreditsAvailableCount?: number | null
   quotaLoading: boolean
   quotaError?: string
   refreshStatus?: 'queued' | 'running' | 'completed' | 'failed'
+  quotaResetting?: boolean
   displayQuotas: DisplayQuota[]
+  credentialHealth?: UsageCredentialHealth
 }
 
 export interface AiProviderCredentialRow {
@@ -74,6 +81,7 @@ export interface AiProviderCredentialRow {
   cacheRate: number | null
   lastUsedText?: string
   statsUpdatedText?: string
+  credentialHealth?: UsageCredentialHealth
 }
 
 export interface CredentialIdentityGroups {
@@ -124,11 +132,12 @@ export function paginateCredentials<T>(items: T[], page: number, pageSize = CRED
 export function buildAuthFileCredentialRows(
   // Auth Files 行合并 usage identity、缓存 quota 和刷新任务状态，组件不再重复拼装字段。
   identities: UsageIdentity[],
-  quotas: Map<string, UsageQuotaRow[]> = new Map(),
-  quotaStates: Map<string, Pick<AuthFileCredentialRow, 'quotaLoading' | 'quotaError' | 'refreshStatus'>> = new Map(),
+  quotas: Map<string, UsageQuotaCheckResponse> = new Map(),
+  quotaStates: Map<string, Pick<AuthFileCredentialRow, 'quotaLoading' | 'quotaError' | 'refreshStatus' | 'quotaResetting'>> = new Map(),
 ): AuthFileCredentialRow[] {
   return identities.map((identity) => {
-    const quota = quotas.get(identity.identity) ?? []
+    const quotaResponse = quotas.get(identity.identity)
+    const quota = quotaResponse?.quota ?? []
     const state = quotaStates.get(identity.identity)
     const displayQuotas = quota.map(toDisplayQuota).filter(isDisplayableQuota)
     const planType = firstNonEmpty(...quota.map((row) => row.planType), identity.plan_type)
@@ -151,10 +160,13 @@ export function buildAuthFileCredentialRows(
       totalTokens: safeNumber(identity.total_tokens),
       cacheRate: cacheRate(identity),
       quota,
+      quotaResetCreditsAvailableCount: quotaResponse?.rateLimitResetCreditsAvailableCount,
       quotaLoading: state?.quotaLoading ?? false,
       quotaError: state?.quotaError,
       refreshStatus: state?.refreshStatus,
+      quotaResetting: state?.quotaResetting ?? false,
       displayQuotas,
+      credentialHealth: identity.credential_health,
     }
   })
 }
@@ -176,6 +188,7 @@ export function buildAiProviderCredentialRows(identities: UsageIdentity[]): AiPr
     cacheRate: cacheRate(identity),
     lastUsedText: identity.last_used_at,
     statsUpdatedText: identity.stats_updated_at,
+    credentialHealth: identity.credential_health,
   }))
 }
 
@@ -274,13 +287,13 @@ function formatQuotaWindowCost(cost: number): string {
 function quotaLabel(row: UsageQuotaRow, windowSeconds?: number): string | undefined {
   // 对已知窗口按秒数纠正标签；未知窗口不展示 Window 占位，避免误导用户。
   const label = row.label || row.metric || row.scope || row.key
-  if (windowSeconds === 18000) {
+  if (windowSeconds === FIVE_HOUR_WINDOW_SECONDS) {
     return knownWindowLabel(label, '5h')
   }
-  if (windowSeconds === 604800) {
+  if (windowSeconds === WEEKLY_WINDOW_SECONDS) {
     return knownWindowLabel(label, 'Weekly')
   }
-  if (windowSeconds === 2592000) {
+  if (windowSeconds === THIRTY_DAY_WINDOW_SECONDS || windowSeconds === AVERAGE_MONTH_WINDOW_SECONDS) {
     return knownWindowLabel(label, 'Monthly')
   }
   if (windowSeconds !== undefined) {

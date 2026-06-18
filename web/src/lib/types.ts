@@ -38,10 +38,6 @@ export interface UsageOverviewUsageSnapshot {
   success_count: number
   failure_count: number
   total_tokens: number
-  requests_by_day: Record<string, number>
-  requests_by_hour: Record<string, number>
-  tokens_by_day: Record<string, number>
-  tokens_by_hour: Record<string, number>
 }
 
 export interface UsageOverviewSummary {
@@ -52,6 +48,7 @@ export interface UsageOverviewSummary {
   tpm: number
   total_cost: number
   cost_available: boolean
+  input_tokens: number
   cached_tokens: number
   reasoning_tokens: number
 }
@@ -62,11 +59,7 @@ export interface UsageOverviewSeries {
   rpm: Record<string, number>
   tpm: Record<string, number>
   cost: Record<string, number>
-  input_tokens: Record<string, number>
-  output_tokens: Record<string, number>
-  cached_tokens: Record<string, number>
-  reasoning_tokens: Record<string, number>
-  models?: Record<string, UsageOverviewSeries>
+  cache_rate: Record<string, number | null>
 }
 
 export interface UsageOverviewServiceHealthBlock {
@@ -89,12 +82,89 @@ export interface UsageOverviewServiceHealth {
   block_details: UsageOverviewServiceHealthBlock[]
 }
 
+export type OverviewRealtimeWindow = '15m' | '30m' | '60m'
+
+export interface RealtimeTokenVelocityPoint {
+  bucket: string
+  tokens_per_minute: number
+  tokens: number
+  cost?: number
+}
+
+export interface RealtimeResponseLevelPoint {
+  bucket: string
+  ttft_p50_ms?: number
+  ttft_p95_ms?: number
+  latency_p50_ms?: number
+  latency_p95_ms?: number
+}
+
+export interface RealtimeResponseAveragePoint {
+  bucket: string
+  avg_ms?: number | null
+}
+
+export interface RealtimeResponseParticle {
+  bucket: string
+  ms: number
+  count: number
+}
+
+export interface RealtimeResponseDistributionSeries {
+  average_line: RealtimeResponseAveragePoint[]
+  particles: RealtimeResponseParticle[]
+}
+
+export interface RealtimeResponseDistribution {
+  ttft: RealtimeResponseDistributionSeries
+  latency: RealtimeResponseDistributionSeries
+}
+
+export interface RealtimeUsageTopItem {
+  key: string
+  label: string
+  tokens: number
+  requests: number
+  cost?: number
+  share: number
+}
+
+export interface RealtimeCurrentUsage {
+  models: RealtimeUsageTopItem[]
+  api_keys: RealtimeUsageTopItem[]
+  auth_files: RealtimeUsageTopItem[]
+  ai_providers: RealtimeUsageTopItem[]
+}
+
+export interface RealtimeRequestLevelPoint {
+  bucket: string
+  requests_per_minute: number
+  requests: number
+}
+
+export interface RealtimeCacheLevelPoint {
+  bucket: string
+  cache_rate?: number | null
+  cached_tokens: number
+  input_tokens: number
+}
+
+export interface OverviewRealtimeBlock {
+  window: OverviewRealtimeWindow
+  timezone?: string
+  bucket_seconds: number
+  token_velocity: RealtimeTokenVelocityPoint[]
+  response_level: RealtimeResponseLevelPoint[]
+  response_distribution: RealtimeResponseDistribution
+  current_usage: RealtimeCurrentUsage
+  request_level: RealtimeRequestLevelPoint[]
+  cache_level: RealtimeCacheLevelPoint[]
+}
+
 export interface UsageOverviewResponse {
   usage: UsageOverviewUsageSnapshot
   summary?: UsageOverviewSummary
   series?: UsageOverviewSeries
-  hourly_series?: UsageOverviewSeries
-  daily_series?: UsageOverviewSeries
   service_health?: UsageOverviewServiceHealth
   timezone?: string
   range_start?: string
@@ -158,6 +228,25 @@ export interface UsageEventSourceFilterOptionsResponse {
 
 export type UsageIdentityAuthType = 1 | 2
 
+export interface UsageCredentialHealthBucket {
+  start_time: string
+  end_time: string
+  success: number
+  failure: number
+  rate: number
+}
+
+export interface UsageCredentialHealth {
+  window_seconds: number
+  bucket_seconds: number
+  window_start: string
+  window_end: string
+  total_success: number
+  total_failure: number
+  success_rate: number
+  buckets: UsageCredentialHealthBucket[]
+}
+
 export interface UsageIdentity {
   id: string
   name: string
@@ -188,6 +277,7 @@ export interface UsageIdentity {
   first_used_at?: string
   last_used_at?: string
   stats_updated_at?: string
+  credential_health?: UsageCredentialHealth
   is_deleted: boolean
   created_at: string
   updated_at: string
@@ -241,6 +331,13 @@ export interface UsageQuotaRow {
 export interface UsageQuotaCheckResponse {
   id: string
   quota: UsageQuotaRow[]
+  rateLimitResetCreditsAvailableCount?: number | null
+}
+
+export interface UsageQuotaResetResponse {
+  authIndex: string
+  code?: string
+  windowsReset?: number
 }
 
 export interface UsageQuotaCacheItem {
@@ -256,6 +353,11 @@ export interface UsageQuotaCacheItem {
 
 export interface UsageQuotaCacheResponse {
   items: UsageQuotaCacheItem[]
+}
+
+export interface AuthFilesManagementResponse {
+  names: string[]
+  affected: number
 }
 
 export interface UsageQuotaRefreshTaskResponse {
@@ -292,6 +394,7 @@ export interface UsageQuotaInspectionStatusResponse {
   limit_reached: number
   unauthorized_401: number
   payment_required_402: number
+  unauthorized_401_402: number
   other_failed: number
   unknown: number
   results: UsageQuotaInspectionResult[]
@@ -384,6 +487,31 @@ export interface AnalysisModelEfficiencyItem {
   cache_rate: number
 }
 
+export interface AnalysisLatencyPoint {
+  ttft_ms: number
+  latency_ms: number
+}
+
+export interface AnalysisLatencyDensityCell {
+  ttft_min_ms: number
+  ttft_max_ms: number
+  latency_min_ms: number
+  latency_max_ms: number
+  count: number
+  intensity: number
+}
+
+export interface AnalysisLatencyDiagnostics {
+  points: AnalysisLatencyPoint[]
+  density: AnalysisLatencyDensityCell[]
+  total_points: number
+  sampled: boolean
+  p95_ttft_ms: number
+  p95_latency_ms: number
+  max_ttft_ms: number
+  max_latency_ms: number
+}
+
 export interface AnalysisResponse {
   granularity: 'hourly' | 'daily'
   timezone: string
@@ -397,14 +525,19 @@ export interface AnalysisResponse {
   heatmap: AnalysisHeatmapPayload
   cost_breakdown: AnalysisCostBreakdown
   model_efficiency: AnalysisModelEfficiencyItem[]
+  latency_diagnostics: AnalysisLatencyDiagnostics
 }
 
-export interface CpaApiKeySettingsItem {
+export interface CpaApiKeyDisplayItem {
   id: string
   keyAlias: string
   displayKey: string
   label: string
   lastSyncedAt: string | null
+}
+
+export interface CpaApiKeySettingsItem extends CpaApiKeyDisplayItem {
+  apiKey: string
 }
 
 export interface CpaApiKeyOption {
@@ -413,6 +546,10 @@ export interface CpaApiKeyOption {
 }
 
 export interface CpaApiKeysResponse {
+  items: CpaApiKeyDisplayItem[]
+}
+
+export interface CpaApiKeySettingsResponse {
   items: CpaApiKeySettingsItem[]
 }
 
@@ -430,6 +567,17 @@ export interface ModelPrice {
   cacheCreation: number
 }
 
+export interface PricingSaveFailure {
+  model: string
+  message: string
+  error?: unknown
+}
+
+export interface PricingSaveResult {
+  successModels: string[]
+  failures: PricingSaveFailure[]
+}
+
 export interface PricingEntry {
   model: string
   pricing_style: PricingStyle
@@ -445,6 +593,27 @@ export interface UsedModelsResponse {
 
 export interface PricingResponse {
   pricing: PricingEntry[]
+}
+
+export interface PricingSyncMatch {
+  model: string
+  matched_model: string
+  match_type: string
+  source_provider_id: string
+  source_provider_name: string
+  pricing_style: PricingStyle
+  prompt_price_per_1m: number
+  completion_price_per_1m: number
+  cache_price_per_1m: number
+  cache_creation_price_per_1m: number
+}
+
+export interface PricingSyncPreviewResponse {
+  source: string
+  source_url: string
+  metadata_models: number
+  matches: PricingSyncMatch[]
+  unmatched_models: string[]
 }
 
 export type KeyOverviewTimeRange = '4h' | '8h' | '12h' | '24h' | 'today' | 'yesterday' | '7d' | '30d'
