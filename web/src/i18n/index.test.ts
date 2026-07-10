@@ -45,6 +45,15 @@ describe('i18n resources', () => {
     expect(i18n.getResource('zh-TW', 'translation', 'usage_stats.credentials_column_activity')).toBe('活動');
   });
 
+  it('keeps session source labels available in every language', () => {
+    expect(i18n.getResource('en', 'translation', 'usage_stats.session_settings_source_standard')).toBe('Standalone');
+    expect(i18n.getResource('en', 'translation', 'usage_stats.session_settings_source_embed')).toBe('CPAMC Embed');
+    expect(i18n.getResource('zh', 'translation', 'usage_stats.session_settings_source_standard')).toBe('独立访问');
+    expect(i18n.getResource('zh', 'translation', 'usage_stats.session_settings_source_embed')).toBe('CPAMC 嵌入');
+    expect(i18n.getResource('zh-TW', 'translation', 'usage_stats.session_settings_source_standard')).toBe('獨立訪問');
+    expect(i18n.getResource('zh-TW', 'translation', 'usage_stats.session_settings_source_embed')).toBe('CPAMC 嵌入');
+  });
+
   it('keeps credential health chart labels available in every language', () => {
     expect(i18n.getResource('en', 'translation', 'usage_stats.credentials_health_last_5h')).toBe('Last 5h');
     expect(i18n.getResource('en', 'translation', 'usage_stats.credentials_health_ok')).toBe('OK');
@@ -113,6 +122,18 @@ describe('i18n resources', () => {
     expect(i18n.getResource('zh-TW', 'translation', 'usage_stats.request_type')).toBe('類型');
   });
 
+  it('labels the request speed mode column across languages', () => {
+    expect(i18n.getResource('en', 'translation', 'usage_stats.speed_mode')).toBe('Speed Mode');
+    expect(i18n.getResource('en', 'translation', 'usage_stats.speed_mode_standard')).toBe('Standard');
+    expect(i18n.getResource('en', 'translation', 'usage_stats.speed_mode_fast')).toBe('Fast');
+    expect(i18n.getResource('zh', 'translation', 'usage_stats.speed_mode')).toBe('速度模式');
+    expect(i18n.getResource('zh', 'translation', 'usage_stats.speed_mode_standard')).toBe('标准');
+    expect(i18n.getResource('zh', 'translation', 'usage_stats.speed_mode_fast')).toBe('快速');
+    expect(i18n.getResource('zh-TW', 'translation', 'usage_stats.speed_mode')).toBe('速度模式');
+    expect(i18n.getResource('zh-TW', 'translation', 'usage_stats.speed_mode_standard')).toBe('標準');
+    expect(i18n.getResource('zh-TW', 'translation', 'usage_stats.speed_mode_fast')).toBe('快速');
+  });
+
   it('keeps Analysis heatmap copy focused on hover details', () => {
     expect(i18n.getResource('en', 'translation', 'usage_stats.analysis_heatmap_subtitle')).toBe('Token distribution across API keys and models with hover details.');
     expect(i18n.getResource('zh', 'translation', 'usage_stats.analysis_heatmap_subtitle')).toBe('展示 API Key 与模型组合下的 Token 分布，悬浮查看明细。');
@@ -150,6 +171,12 @@ describe('i18n resources', () => {
     expect(i18n.getResource('en', 'translation', 'usage_stats.overview_realtime_load_failed')).toBe('Failed to load realtime overview');
     expect(i18n.getResource('zh', 'translation', 'usage_stats.overview_realtime_load_failed')).toBe('实时概览加载失败');
     expect(i18n.getResource('zh-TW', 'translation', 'usage_stats.overview_realtime_load_failed')).toBe('即時概覽載入失敗');
+  });
+
+  it('labels the realtime overview section as metrics', () => {
+    expect(i18n.getResource('en', 'translation', 'usage_stats.overview_realtime_section_title')).toBe('Realtime Metrics');
+    expect(i18n.getResource('zh', 'translation', 'usage_stats.overview_realtime_section_title')).toBe('实时指标');
+    expect(i18n.getResource('zh-TW', 'translation', 'usage_stats.overview_realtime_section_title')).toBe('即時指標');
   });
 
   it('localizes realtime overview sample and rolling hints', () => {
@@ -257,7 +284,7 @@ describe('i18n resources', () => {
 
   it('keeps the login product title aligned across languages', () => {
     expect(i18n.getResourceBundle('en', 'translation').auth.login_title).toBe('CPA Usage Statistics Dashboard');
-    expect(i18n.getResourceBundle('zh', 'translation').auth.login_title).toBe('CPA 用量统计仪表盘');
-    expect(i18n.getResourceBundle('zh-TW', 'translation').auth.login_title).toBe('CPA 用量統計儀表板');
+    expect(i18n.getResourceBundle('zh', 'translation').auth.login_title).toBe('CPA 用量统计\n仪表盘');
+    expect(i18n.getResourceBundle('zh-TW', 'translation').auth.login_title).toBe('CPA 用量統計\n儀表板');
   });
 });

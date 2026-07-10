@@ -28,6 +28,13 @@ It relies on [CLIProxyAPI (CPA)](https://github.com/router-for-me/CLIProxyAPI) a
 - Maintain model prices for cost estimation and reporting
 - Automatically sync CPA Auth Files, API Keys, AI Providers, and other metadata changes
 - Optional password login protection, SQLite backups, Docker/Docker Compose, and systemd deployment
+- Embed the Keeper dashboard into CPAMC through the CPA plugin
+
+## Sponsors and Special Thanks
+
+- Thanks to [CLIProxyAPI (CPA)](https://github.com/router-for-me/CLIProxyAPI) for providing the upstream CPA foundation and data source this project builds on.
+- Thanks to [@YouShouldBetOnMe](https://github.com/YouShouldBetOnMe) for supporting CPA Usage Keeper.
+- Thanks to the CPA discussion group for their discussions and feedback.
 
 ## Quick Start
 
@@ -37,7 +44,8 @@ Recommended deployment path:
 
 - First-time CPA + Keeper deployment: use [Docker Compose](#docker-compose-recommended).
 - CPA already runs on the host: use [Docker](#docker-cpa-already-runs-on-the-host).
-- No containers: use the [Linux binary](#linux-binary).
+- macOS: use [Homebrew](#macos-homebrew).
+- Linux without containers: use the [Linux binary](#linux-binary).
 
 For public deployments, enable `AUTH_ENABLED=true` and configure `LOGIN_PASSWORD` to protect your data.
 
@@ -153,6 +161,40 @@ docker run -d \
   ghcr.io/willxup/cpa-usage-keeper:latest
 ```
 
+### macOS Homebrew
+
+Homebrew is the recommended binary install path for macOS. It installs the macOS package from the CPA Usage Keeper tap, and future releases can be upgraded with normal Homebrew commands.
+
+Install:
+
+```bash
+brew tap Willxup/cpa-usage-keeper
+brew install cpa-usage-keeper
+```
+
+Edit the generated config file. At minimum, set `CPA_BASE_URL` and `CPA_MANAGEMENT_KEY`. For public deployments, also set `AUTH_ENABLED=true` and `LOGIN_PASSWORD`:
+
+```bash
+vim "$(brew --prefix)/etc/cpa-usage-keeper.env"
+```
+
+Start the background service:
+
+```bash
+brew services start cpa-usage-keeper
+```
+
+Homebrew stores Keeper data under `$(brew --prefix)/var/cpa-usage-keeper`, stdout logs at `$(brew --prefix)/var/log/cpa-usage-keeper.log`, and stderr logs at `$(brew --prefix)/var/log/cpa-usage-keeper.err.log`.
+
+Useful commands:
+
+```bash
+brew services list
+brew services restart cpa-usage-keeper
+brew update
+brew upgrade cpa-usage-keeper
+```
+
 ### Linux Binary
 
 #### Download
@@ -222,13 +264,15 @@ For first-time deployments, start with "Minimum required" and "Web access and re
 | --- | --- | --- | --- |
 | `APP_PORT` | No | `8080` | Keeper HTTP listen port |
 | `APP_BASE_PATH` | No | root path | Keeper subpath prefix, such as `/keeper`; empty means `/` |
-| `CPA_PUBLIC_URL` | No | current browser origin root | Public CPA URL for the "Back to CPA" link |
+| `CPA_PUBLIC_URL` | No | current browser origin root | Public CPA URL for the "Back to CPA" link and CPAMC frame trust |
 
 `APP_BASE_PATH` must be empty or start with `/`; for example `/cpa`. `/cpa/` is normalized to `/cpa`.
 
 `CPA_PUBLIC_URL` may be a domain, a full URL with scheme, or a relative path, such as `https://cpa.example.com`, `https://cpa.example.com/cpa/`, or `/cpa/`. The frontend appends `management.html` automatically and handles trailing `/` or values that already end in `management.html`. When unset, the "Back to CPA" link points to `/management.html` on the current browser origin. If CPA and Keeper use different public domains, ports, or paths, set `CPA_PUBLIC_URL` explicitly.
 
-`CPA_BASE_URL` is only used by the server to call CPA, so it can be a Docker service name or private network address. Do not use it as the browser navigation URL.
+For CPAMC frame trust, `CPA_PUBLIC_URL` must be an explicit `http://` or `https://` URL with a host. Relative paths only affect same-origin "Back to CPA" navigation and do not add an external `frame-ancestors` source.
+
+`CPA_BASE_URL` is only used by the server to call CPA, so it can be a Docker service name or private network address. It is not used for browser navigation or frame trust.
 
 ### Login Protection
 
@@ -248,11 +292,11 @@ For first-time deployments, start with "Minimum required" and "Web access and re
 
 ### Auth Files Quota Refresh
 
+Scheduled Auth Files quota refresh is configured from the gear button in the Auth Files inspection dialog. The setting is stored in the local SQLite database and does not require the page to stay open.
+
 | Variable | Required | Default | Description |
 | --- | --- | --- | --- |
-| `QUOTA_AUTO_REFRESH_ENABLED` | No | `false` | Enable Auth Files quota auto-refresh; it runs only while a backend page is visible and sending heartbeats |
-| `QUOTA_AUTO_REFRESH_INTERVAL` | No | `5m` | Auth Files quota auto-refresh interval, minimum `60s`, active only while a backend page is active |
-| `QUOTA_REFRESH_WORKER_LIMIT` | No | `10` | Maximum Auth Files quota refresh concurrency, capped at `100` |
+| `QUOTA_REFRESH_WORKER_LIMIT` | No | `10` | Maximum Auth Files quota refresh concurrency for manual and scheduled refresh, capped at `100` |
 
 ### Redis Queue Advanced Settings
 
@@ -271,6 +315,7 @@ For first-time deployments, start with "Minimum required" and "Web access and re
 | `LOG_LEVEL` | No | `info` | Log level |
 | `LOG_FILE_ENABLED` | No | `true` | Write persistent log files |
 | `LOG_RETENTION_DAYS` | No | `7` | Log retention days; `0` disables cleanup |
+| `CLEANUP_USAGE_EVENTS_ENABLED` | No | `false` | Delete expired raw `usage_events` during daily maintenance; when enabled, rows before 00:00 on the first day of the previous month are deleted |
 | `BACKUP_ENABLED` | No | `true` | Enable SQLite database backups |
 | `BACKUP_INTERVAL` | No | `24h` | Database backup interval |
 | `BACKUP_RETENTION_DAYS` | No | `7` | Backup retention days |
@@ -290,7 +335,10 @@ Security and data notes:
 - SQLite database backups store original data from the application database, and backup files are not encrypted.
 - Browser-facing APIs redact key-like source/lookup fields or map them to stable public identifiers, but raw database values are unchanged.
 - For public deployments, enable `AUTH_ENABLED=true` and terminate HTTPS at your reverse proxy.
-- Login sessions are stored in process memory and become invalid after restart.
+- Login session hashes are stored in SQLite and remain valid across service restarts until logout or `AUTH_SESSION_TTL` expiry.
+- CPAMC embedded mode uses a separate embed session. Keeper first tries the `HttpOnly` `cpa_usage_keeper_embed_session` cookie, then falls back to an embed-only request header when the browser cannot persist the embedded cookie. The normal dashboard session keeps `SameSite=Lax` and is not reused by the embedded view.
+- Same-origin CPAMC embedding works with the default `frame-ancestors 'self'`. For cross-origin CPAMC embedding, set `CPA_PUBLIC_URL` to the public CPA/CPAMC origin; Keeper uses only `CPA_PUBLIC_URL` for the external `frame-ancestors` source, never `CPA_BASE_URL`.
+- Cross-site embedded login works best over HTTPS with browser support for third-party or partitioned cookies. When that cookie path is unavailable, CPAMC embedded mode falls back to a per-tab header token stored in browser session storage.
 - Redis inbox raw messages are cleaned up automatically: successful rows are kept until the end of the current day, and failed rows are kept for 7 days.
 
 ## Nginx reverse proxy
@@ -320,7 +368,7 @@ CPA_PUBLIC_URL=https://cpa.example.com
 cmd/server/              Application entrypoint
 internal/api/            HTTP routes and handlers
 internal/app/            App wiring and startup
-internal/auth/           In-memory session auth
+internal/auth/           Session auth and persistence
 internal/backup/         SQLite database backup management
 internal/benchmark/      Aggregation benchmark helpers
 internal/config/         Environment config loading
@@ -343,7 +391,7 @@ web/                     React + TypeScript frontend
 
 ### Prerequisites
 
-- Go 1.22+
+- Go 1.26+
 - Node.js 22+
 - npm
 - A running [CLIProxyAPI (CPA)](https://github.com/router-for-me/CLIProxyAPI) instance
@@ -396,9 +444,13 @@ npm --prefix ./web run build
 
 ## Star History
 
-<p>
-  <img src="https://api.star-history.com/chart?repos=willxup/cpa-usage-keeper&type=date&legend=top-left" />
-</p>
+<a href="https://www.star-history.com/?repos=willxup%2Fcpa-usage-keeper&type=date&legend=top-left">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=willxup/cpa-usage-keeper&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=willxup/cpa-usage-keeper&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=willxup/cpa-usage-keeper&type=date&legend=top-left" />
+ </picture>
+</a>
 
 ## License
 

@@ -11,18 +11,53 @@ export interface AuthSessionResponse {
   api_key?: AuthSessionAPIKeySummary
 }
 
+export type AuthManagedSessionKind = 'admin' | 'api_key'
+export type AuthManagedSessionSource = 'standard' | 'embed'
+
+export interface AuthManagedSessionItem {
+  id: string
+  kind: AuthManagedSessionKind
+  role: AuthRole
+  source?: AuthManagedSessionSource
+  current?: boolean
+  loginAt?: string
+  expiresAt?: string
+  apiKeyId?: string
+  label?: string
+  displayKey?: string
+}
+
+export interface AuthManagedSessionsResponse {
+  items: AuthManagedSessionItem[]
+}
+
 export interface StatusResponse {
   running: boolean
   sync_running: boolean
   timezone: string
-  version?: string
-  updateCheckEnabled?: boolean
-  quotaAutoRefreshEnabled?: boolean
   cpa_public_url?: string
+  cpa_request_log_access_enabled?: boolean
   last_run_at?: string
   last_error?: string
   last_warning?: string
   last_status?: string
+}
+
+export type QuotaAutoRefreshScheduleUnit = 'minute' | 'hour' | 'day' | 'week'
+
+export interface QuotaAutoRefreshSchedule {
+  unit: QuotaAutoRefreshScheduleUnit
+  value: number
+}
+
+export interface QuotaAutoRefreshSettings {
+  enabled: boolean
+  schedule: QuotaAutoRefreshSchedule | null
+}
+
+export interface VersionResponse {
+  version: string
+  updateCheckEnabled: boolean
 }
 
 export interface UpdateCheckResponse {
@@ -51,6 +86,10 @@ export interface UsageOverviewSummary {
   input_tokens: number
   cached_tokens: number
   reasoning_tokens: number
+  daily_average_requests?: number
+  daily_average_tokens?: number
+  daily_average_cost?: number
+  daily_average_range_days?: number
 }
 
 export interface UsageOverviewSeries {
@@ -106,6 +145,7 @@ export interface RealtimeResponseAveragePoint {
 
 export interface RealtimeResponseParticle {
   bucket: string
+  timestamp?: string
   ms: number
   count: number
 }
@@ -113,6 +153,9 @@ export interface RealtimeResponseParticle {
 export interface RealtimeResponseDistributionSeries {
   average_line: RealtimeResponseAveragePoint[]
   particles: RealtimeResponseParticle[]
+  total_particles?: number
+  sampled?: boolean
+  max_particles?: number
 }
 
 export interface RealtimeResponseDistribution {
@@ -153,6 +196,8 @@ export interface OverviewRealtimeBlock {
   window: OverviewRealtimeWindow
   timezone?: string
   bucket_seconds: number
+  window_start?: string
+  window_end?: string
   token_velocity: RealtimeTokenVelocityPoint[]
   response_level: RealtimeResponseLevelPoint[]
   response_distribution: RealtimeResponseDistribution
@@ -183,10 +228,13 @@ export interface UsageEventTokens {
 
 export interface UsageEvent {
   id?: string
+  request_id?: string
   timestamp: string
   api_key?: string
   model: string
+  model_alias?: string
   reasoning_effort?: string
+  service_tier?: string
   executor_type?: string
   endpoint?: string
   source: string
@@ -216,6 +264,22 @@ export interface UsageEventsResponse {
   page: number
   page_size: number
   total_pages: number
+}
+
+export interface UsageEventRequestLogSection {
+  title: string
+  content: string
+}
+
+export interface UsageEventRequestLogResponse {
+  event_id: string
+  request_id?: string
+  filename?: string
+  available: boolean
+  previewable?: boolean
+  too_large?: boolean
+  downloadable?: boolean
+  sections: UsageEventRequestLogSection[]
 }
 
 export interface UsageEventModelFilterOptionsResponse {
@@ -250,6 +314,7 @@ export interface UsageCredentialHealth {
 export interface UsageIdentity {
   id: string
   name: string
+  alias?: string | null
   displayName?: string
   auth_type: UsageIdentityAuthType
   auth_type_name: string
@@ -565,6 +630,7 @@ export interface ModelPrice {
   completion: number
   cache: number
   cacheCreation: number
+  multiplier: number
 }
 
 export interface PricingSaveFailure {
@@ -585,6 +651,7 @@ export interface PricingEntry {
   completion_price_per_1m: number
   cache_price_per_1m: number
   cache_creation_price_per_1m: number
+  price_multiplier: number
 }
 
 export interface UsedModelsResponse {

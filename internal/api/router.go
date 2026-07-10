@@ -6,11 +6,13 @@ import (
 	"io"
 	"io/fs"
 	"net/http"
+	"os"
 	"path"
 	"strconv"
 	"strings"
 	"time"
 
+	"cpa-usage-keeper/internal/auth"
 	"cpa-usage-keeper/internal/poller"
 	"cpa-usage-keeper/internal/quota"
 	"cpa-usage-keeper/internal/service"
@@ -26,23 +28,20 @@ type StatusProvider interface {
 	Status() poller.Status
 }
 
-type ActiveStatusRecorder interface {
-	RecordActiveStatus(time.Time)
-}
-
 type QuotaProvider interface {
 	GetCachedQuota(context.Context, quota.CacheRequest) (quota.CacheResponse, error)
 	Refresh(context.Context, quota.RefreshRequest) (quota.RefreshResponse, error)
 	GetRefreshTaskByAuthIndex(context.Context, string) (quota.RefreshTaskResponse, error)
 	GetInspectionStatus(context.Context) (quota.InspectionStatus, error)
 	StartInspection(context.Context) (quota.InspectionStatus, error)
+	GetAutoRefreshSettings(context.Context) (quota.AutoRefreshSettings, error)
+	UpdateAutoRefreshSettings(context.Context, quota.AutoRefreshSettings) (quota.AutoRefreshSettings, error)
 	Reset(context.Context, quota.ResetRequest) (quota.ResetResponse, error)
 }
 
 type StatusRouteConfig struct {
-	CPAPublicURL            string
-	ActiveRecorder          ActiveStatusRecorder
-	QuotaAutoRefreshEnabled bool
+	CPAPublicURL               string
+	CPARequestLogAccessEnabled bool
 }
 
 type OptionalProviders struct {
@@ -50,6 +49,7 @@ type OptionalProviders struct {
 	Quota         QuotaProvider
 	CPAAPIKeys    service.CPAAPIKeyProvider
 	AuthFiles     service.AuthFilesManagementProvider
+	RequestLogs   service.RequestLogProvider
 	Status        StatusRouteConfig
 }
 
@@ -71,9 +71,10 @@ func NewRouter(
 	registerHealthRoutes(appGroup)
 
 	apiV1 := appGroup.Group("/api/v1")
-	apiV1.GET("/ping", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{"message": "ok"})
-	})
+	apiV1.Use(requestIntentMiddleware())
+	if debugAPIRoutesEnabled() {
+		registerPingRoutes(apiV1)
+	}
 
 	authGroup := apiV1.Group("/auth")
 	if authHandler == nil {
@@ -85,15 +86,24 @@ func NewRouter(
 	var quotaProvider QuotaProvider
 	var cpaAPIKeyProvider service.CPAAPIKeyProvider
 	var authFilesProvider service.AuthFilesManagementProvider
+	var requestLogProvider service.RequestLogProvider
 	var statusConfig StatusRouteConfig
 	if len(optionalProviders) > 0 {
 		usageIdentityProvider = optionalProviders[0].UsageIdentity
 		quotaProvider = optionalProviders[0].Quota
 		cpaAPIKeyProvider = optionalProviders[0].CPAAPIKeys
 		authFilesProvider = optionalProviders[0].AuthFiles
+		requestLogProvider = optionalProviders[0].RequestLogs
 		statusConfig = optionalProviders[0].Status
 	}
 	authHandler.setCPAAPIKeyProvider(cpaAPIKeyProvider)
+	requestLogDownloadTokens := newRequestLogDownloadTokenStore()
+
+	registerUsageEventRequestLogDownloadTokenRoutes(apiV1, requestLogProvider, requestLogDownloadTokens, statusConfig.CPARequestLogAccessEnabled)
+
+	versionProtected := apiV1.Group("")
+	versionProtected.Use(authHandler.roleMiddleware(auth.RoleAdmin, auth.RoleAPIKeyViewer))
+	registerVersionRoutes(versionProtected)
 
 	adminProtected := apiV1.Group("")
 	adminProtected.Use(authHandler.adminMiddleware())
@@ -101,9 +111,10 @@ func NewRouter(
 	registerUpdateRoutes(adminProtected, nil)
 	registerUsageOverviewRoute(adminProtected, usageProvider, cpaAPIKeyProvider)
 	registerUsageAnalysisRoute(adminProtected, usageProvider, cpaAPIKeyProvider)
-	registerUsageEventsRoute(adminProtected, usageProvider, usageIdentityProvider, cpaAPIKeyProvider)
+	registerUsageEventsRoute(adminProtected, usageProvider, usageIdentityProvider, cpaAPIKeyProvider, requestLogProvider, requestLogDownloadTokens, statusConfig.CPARequestLogAccessEnabled)
 	registerUsageIdentityRoutes(adminProtected, usageIdentityProvider)
 	registerAuthFileManagementRoutes(adminProtected, authFilesProvider)
+	registerAuthSessionManagementRoutes(adminProtected, authHandler)
 	registerCPAAPIKeyRoutes(adminProtected, cpaAPIKeyProvider)
 	registerPricingRoutes(adminProtected, pricingProvider)
 	registerQuotaRoutes(adminProtected, quotaProvider)
@@ -122,7 +133,7 @@ func NewRouter(
 					c.Status(http.StatusNotFound)
 					return
 				}
-				setHTMLCacheHeaders(c)
+				setHTMLCacheHeaders(c, authConfig.FrameAncestorOrigins)
 				c.Data(http.StatusOK, "text/html; charset=utf-8", indexHTML)
 			}
 			serveAsset := func(c *gin.Context) {
@@ -167,7 +178,22 @@ func NewRouter(
 	return router
 }
 
-func setHTMLCacheHeaders(c *gin.Context) {
+func debugAPIRoutesEnabled() bool {
+	return version.Version == "dev" || os.Getenv("GIN_MODE") == gin.DebugMode
+}
+
+func registerPingRoutes(router gin.IRoutes) {
+	router.GET("/ping", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"message": "ok"})
+	})
+}
+
+func setHTMLCacheHeaders(c *gin.Context, frameAncestorOrigins []string) {
+	setNoStoreHeaders(c)
+	setFrameAncestorsCSP(c, frameAncestorOrigins)
+}
+
+func setNoStoreHeaders(c *gin.Context) {
 	c.Header("Cache-Control", "no-store")
 	c.Header("Pragma", "no-cache")
 	c.Header("Expires", "0")
@@ -175,6 +201,23 @@ func setHTMLCacheHeaders(c *gin.Context) {
 
 func setStaticAssetCacheHeaders(c *gin.Context) {
 	c.Header("Cache-Control", "public, max-age=31536000, immutable")
+}
+
+func setFrameAncestorsCSP(c *gin.Context, origins []string) {
+	values := []string{"frame-ancestors", "'self'"}
+	seen := map[string]struct{}{"'self'": {}}
+	for _, origin := range origins {
+		trimmed := strings.TrimSpace(origin)
+		if trimmed == "" {
+			continue
+		}
+		if _, ok := seen[trimmed]; ok {
+			continue
+		}
+		seen[trimmed] = struct{}{}
+		values = append(values, trimmed)
+	}
+	c.Header("Content-Security-Policy", strings.Join(values, " "))
 }
 
 func renderIndexHTML(staticFS fs.FS, basePath string) ([]byte, error) {
@@ -237,17 +280,34 @@ func stripBasePath(basePath, requestPath string) (string, bool) {
 }
 
 type statusResponse struct {
-	Running                 bool       `json:"running"`
-	SyncRunning             bool       `json:"sync_running"`
-	Timezone                string     `json:"timezone"`
-	Version                 string     `json:"version"`
-	UpdateCheckEnabled      bool       `json:"updateCheckEnabled"`
-	QuotaAutoRefreshEnabled bool       `json:"quotaAutoRefreshEnabled"`
-	CPAPublicURL            string     `json:"cpa_public_url,omitempty"`
-	LastRunAt               *time.Time `json:"last_run_at,omitempty"`
-	LastError               string     `json:"last_error,omitempty"`
-	LastWarning             string     `json:"last_warning,omitempty"`
-	LastStatus              string     `json:"last_status,omitempty"`
+	Running                    bool       `json:"running"`
+	SyncRunning                bool       `json:"sync_running"`
+	Timezone                   string     `json:"timezone"`
+	CPAPublicURL               string     `json:"cpa_public_url,omitempty"`
+	CPARequestLogAccessEnabled bool       `json:"cpa_request_log_access_enabled"`
+	LastRunAt                  *time.Time `json:"last_run_at,omitempty"`
+	LastError                  string     `json:"last_error,omitempty"`
+	LastWarning                string     `json:"last_warning,omitempty"`
+	LastStatus                 string     `json:"last_status,omitempty"`
+}
+
+type versionResponse struct {
+	Version            string `json:"version"`
+	UpdateCheckEnabled bool   `json:"updateCheckEnabled"`
+}
+
+func registerVersionRoutes(router gin.IRoutes) {
+	router.GET("/version", func(c *gin.Context) {
+		setNoStoreHeaders(c)
+		c.JSON(http.StatusOK, buildVersionResponse())
+	})
+}
+
+func buildVersionResponse() versionResponse {
+	return versionResponse{
+		Version:            version.Version,
+		UpdateCheckEnabled: updatecheck.IsStableVersion(version.Version),
+	}
 }
 
 func registerStatusRoutes(router gin.IRoutes, statusProvider StatusProvider, config StatusRouteConfig) {
@@ -259,27 +319,18 @@ func registerStatusRoutes(router gin.IRoutes, statusProvider StatusProvider, con
 
 		c.JSON(http.StatusOK, buildStatusResponse(statusProvider.Status(), config))
 	})
-	router.GET("/status/active", func(c *gin.Context) {
-		if config.ActiveRecorder != nil {
-			// 前端可见页面用这个轻量心跳续约，避免限额自动刷新在无人查看后台时持续扫库和请求上游。
-			config.ActiveRecorder.RecordActiveStatus(time.Now())
-		}
-		c.Status(http.StatusNoContent)
-	})
 }
 
 func buildStatusResponse(status poller.Status, config StatusRouteConfig) statusResponse {
 	response := statusResponse{
-		Running:                 status.Running,
-		SyncRunning:             status.SyncRunning,
-		Timezone:                time.Local.String(),
-		Version:                 version.Version,
-		UpdateCheckEnabled:      updatecheck.IsStableVersion(version.Version),
-		QuotaAutoRefreshEnabled: config.QuotaAutoRefreshEnabled,
-		CPAPublicURL:            config.CPAPublicURL,
-		LastError:               status.LastError,
-		LastWarning:             status.LastWarning,
-		LastStatus:              status.LastStatus,
+		Running:                    status.Running,
+		SyncRunning:                status.SyncRunning,
+		Timezone:                   time.Local.String(),
+		CPAPublicURL:               config.CPAPublicURL,
+		CPARequestLogAccessEnabled: config.CPARequestLogAccessEnabled,
+		LastError:                  status.LastError,
+		LastWarning:                status.LastWarning,
+		LastStatus:                 status.LastStatus,
 	}
 	if !status.LastRunAt.IsZero() {
 		lastRunAt := timeutil.NormalizeStorageTime(status.LastRunAt)

@@ -5,6 +5,7 @@ import {
   RequestEventsDetailsCard,
   isRequestEventColumnSelectionControlled,
   resolveRequestEventColumnMenuFocusIndex,
+  shouldCloseMenuOnFocusLeave,
   toggleRequestEventColumnId,
   type RequestEventColumnId,
 } from './RequestEventsDetailsCard';
@@ -17,6 +18,7 @@ const events: UsageEvent[] = [
     api_key: 'Production Key',
     model: 'claude-sonnet',
     reasoning_effort: 'medium',
+    service_tier: 'priority',
     endpoint: 'POST /v1/messages',
     source: 'Provider A',
     source_raw: 'source-a',
@@ -86,6 +88,8 @@ describe('RequestEventsDetailsCard pagination', () => {
     expect(html.indexOf('>API Key</th>')).toBeLessThan(html.indexOf('>Source</th>'));
     expect(html.indexOf('>Source</th>')).toBeLessThan(html.indexOf('>Model</th>'));
     expect(html.indexOf('>Model</th>')).toBeLessThan(html.indexOf('title="Reasoning Effort">Effort</th>'));
+    expect(html.indexOf('title="Reasoning Effort">Effort</th>')).toBeLessThan(html.indexOf('>Speed Mode</th>'));
+    expect(html.indexOf('>Speed Mode</th>')).toBeLessThan(html.indexOf('>Result</th>'));
     expect(html.indexOf('>Result</th>')).toBeLessThan(html.indexOf('>Type</th>'));
     expect(html.indexOf('>Type</th>')).toBeLessThan(html.indexOf('>Endpoint</th>'));
     expect(html.indexOf('>Endpoint</th>')).toBeLessThan(html.indexOf('title="Time to First Token">TTFT</th>'));
@@ -95,6 +99,7 @@ describe('RequestEventsDetailsCard pagination', () => {
     expect(html).toContain('class="_requestEventsAPIKeyCell_');
     expect(html).toContain('title="Production Key">Production Key</td>');
     expect(html).toMatch(/<td class="[^"]*requestEventsNoWrapCell[^"]*">medium<\/td>/);
+    expect(html).toMatch(/<td class="[^"]*requestEventsNoWrapCell[^"]*">Fast<\/td>/);
     expect(html).toMatch(/<td class="[^"]*requestEventsNoWrapCell[^"]*">SSE<\/td><td class="[^"]*requestEventsNoWrapCell[^"]*" title="\/messages">\/messages<\/td>/);
     expect(html.indexOf('>45ms</td>')).toBeLessThan(html.indexOf('>120ms</td>'));
     expect(html).toMatch(/<td class="[^"]*requestEventsNoWrapCell[^"]*">30\.0 t\/s<\/td>/);
@@ -107,6 +112,23 @@ describe('RequestEventsDetailsCard pagination', () => {
     expect(html).toContain('Previous');
     expect(html).toContain('Next');
     expect(html).toContain('disabled');
+  });
+
+  it('maps request speed mode values and falls back for missing values', () => {
+    const html = renderCard({
+      events: [
+        { ...events[0], id: 'default', service_tier: 'default' },
+        { ...events[0], id: 'priority', service_tier: 'priority' },
+        { ...events[0], id: 'fast', service_tier: 'fast' },
+        { ...events[0], id: 'empty', service_tier: '' },
+        { ...events[0], id: 'unknown', service_tier: 'batch' },
+      ],
+    });
+
+    expect(html).toContain('Standard');
+    expect(countOccurrences(html, '>Fast</td>')).toBe(2);
+    expect(html).toMatch(/medium<\/td><td class="[^"]*requestEventsNoWrapCell[^"]*">-<\/td><td class="[^"]*requestEventsNoWrapCell/);
+    expect(html).toMatch(/medium<\/td><td class="[^"]*requestEventsNoWrapCell[^"]*">batch<\/td><td class="[^"]*requestEventsNoWrapCell/);
   });
 
   it('formats timestamps with compact numeric date and time', () => {
@@ -231,6 +253,97 @@ describe('RequestEventsDetailsCard pagination', () => {
     expect(html).not.toContain('aria-label="Credential"');
   });
 
+  it('renders the Result badge as a request log trigger when request id is available', () => {
+    const html = renderCard({
+      events: [{ ...events[0], request_id: 'req-log-101' }],
+      requestLogAccessEnabled: true,
+      onRequestLogOpen: () => undefined,
+    });
+
+    expect(html).toContain('title="Click to view request log"');
+    expect(html).toContain('aria-label="Success. View request log"');
+    expect(html).toContain('_requestEventsResultLogButton_');
+    expect(html).toContain('_requestEventsResultLogIcon_');
+    expect(html).toMatch(/<button[^>]*>.*Success.*<\/button>/);
+  });
+
+  it('renders the Result badge as a request log trigger when the event id is missing', () => {
+    const html = renderCard({
+      events: [{ ...events[0], id: undefined, request_id: 'req-log-missing-id' }],
+      requestLogAccessEnabled: true,
+      onRequestLogOpen: () => undefined,
+    });
+
+    expect(html).toContain('title="Click to view request log"');
+    expect(html).toContain('_requestEventsResultLogButton_');
+  });
+
+  it('keeps the Result badge label stable while a request log loads', () => {
+    const html = renderCard({
+      events: [{ ...events[0], request_id: 'req-log-101' }],
+      requestLogAccessEnabled: true,
+      onRequestLogOpen: () => undefined,
+      requestLogLoadingEventId: '101',
+    });
+
+    expect(html).toContain('aria-label="Success. Loading request log"');
+    expect(html).toContain('aria-busy="true"');
+    expect(html).toMatch(/<button[^>]*>.*Success.*<\/button>/);
+    expect(html).not.toMatch(/<button[^>]*>.*Loading\.\.\..*<\/button>/);
+  });
+
+  it('renders request log content without request id or cache metadata', () => {
+    const html = renderCard({
+      requestLogResponse: {
+        event_id: '101',
+        request_id: 'req-log-101',
+        filename: 'preview-req-log-101.log',
+        available: true,
+        sections: [
+          { title: 'REQUEST INFO', content: 'URL: /v1/responses' },
+          { title: 'API RESPONSE ERROR', content: '{"error":"quota exceeded"}' },
+        ],
+      },
+      onRequestLogClose: () => undefined,
+    });
+
+    expect(html).toContain('Request Info');
+    expect(html).toContain('API Response Error');
+    expect(html).toContain('aria-expanded="true"');
+    expect(html).toContain('aria-expanded="false"');
+    expect(html).toContain('_requestEventsLogSectionChevron_');
+    expect(html).toContain('_requestEventsLogSectionPanel_');
+    expect(html).toContain('URL: /v1/responses');
+    expect(html).not.toContain('Request ID');
+    expect(html).not.toContain('Request ID: req-log-101');
+    expect(html).not.toContain('<span>Cached</span>');
+    expect(html).not.toContain('<span>Fresh</span>');
+    expect(html).not.toContain('preview-req-log-101.log');
+  });
+
+  it('renders a compact large-log download prompt without opening log sections', () => {
+    const html = renderCard({
+      requestLogResponse: {
+        event_id: '101',
+        request_id: 'req-log-101',
+        filename: 'large-request.log',
+        available: true,
+        previewable: false,
+        too_large: true,
+        downloadable: true,
+        sections: [],
+      },
+      onRequestLogClose: () => undefined,
+    });
+
+    expect(html).toContain('Request Log Too Large');
+    expect(html).toContain('Download Raw Log');
+    expect(html).toContain('Cancel');
+    expect(html).toContain('_requestEventsLargeLogModal_');
+    expect(html).toContain('_requestEventsLargeLogPrompt_');
+    expect(html).not.toContain('_requestEventsLogSections_');
+  });
+
   it('keeps selected filters visible when backend options do not include them', () => {
     const html = renderCard({
       modelFilter: 'claude-haiku',
@@ -272,10 +385,17 @@ describe('RequestEventsDetailsCard pagination', () => {
     expect(html).not.toContain('_requestEventsLimitHint_');
   });
 
-  it('hides export buttons while keeping clear filters available', () => {
+  it('renders one export menu trigger instead of separate CSV and JSON buttons', () => {
     const html = renderCard({ modelFilter: 'claude-sonnet' });
 
     expect(html).toContain('Clear Filters');
+    expect(countOccurrences(html, '>Export<')).toBe(1);
+    expect(html.indexOf('aria-label="Result"')).toBeLessThan(html.indexOf('Clear Filters'));
+    expect(html.indexOf('Clear Filters')).toBeLessThan(html.indexOf('aria-label="Columns"'));
+    expect(html.indexOf('>Export<')).toBeLessThan(html.indexOf('aria-label="Result"'));
+    expect(html).toContain('aria-haspopup="menu"');
+    expect(html).toContain('_requestEventsExportButton_');
+    expect(html).toContain('_requestEventsExportButtonInner_');
     expect(html).not.toContain('Export CSV');
     expect(html).not.toContain('Export JSON');
   });
@@ -347,6 +467,16 @@ describe('RequestEventsDetailsCard pagination', () => {
     expect(isRequestEventColumnSelectionControlled(['timestamp'], () => undefined)).toBe(true);
     expect(isRequestEventColumnSelectionControlled(undefined, () => undefined)).toBe(false);
     expect(isRequestEventColumnSelectionControlled(['timestamp'], undefined)).toBe(false);
+  });
+
+  it('closes export menu only when focus leaves the menu container', () => {
+    const insideTarget = {};
+    const outsideTarget = {};
+    const container = { contains: (target: EventTarget) => target === insideTarget };
+
+    expect(shouldCloseMenuOnFocusLeave(container, insideTarget as EventTarget)).toBe(false);
+    expect(shouldCloseMenuOnFocusLeave(container, outsideTarget as EventTarget)).toBe(true);
+    expect(shouldCloseMenuOnFocusLeave(container, null)).toBe(true);
   });
 
   it('cycles column menu focus for arrow and tab navigation', () => {

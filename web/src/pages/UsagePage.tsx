@@ -1,19 +1,23 @@
 import { useState, useMemo, useCallback, useEffect, useRef, type KeyboardEvent, type SyntheticEvent } from 'react';
 import { useTranslation } from 'react-i18next';
-import { ApiError, fetchAnalysis, fetchCpaApiKeyOptions, fetchCpaApiKeySettings, fetchStatus, fetchUpdateCheck, fetchUsageEventModelFilterOptions, fetchUsageEventSourceFilterOptions, fetchUsageEvents, logout, markStatusActive, updateCpaApiKeyAlias } from '@/lib/api';
-import type { AnalysisResponse, CpaApiKeyOption, CpaApiKeySettingsItem, OverviewRealtimeWindow, StatusResponse, UsageEvent, UsageSourceFilterOption } from '@/lib/types';
+import { ApiError, createUsageEventRequestLogDownloadURL, exportUsageEvents, fetchAnalysis, fetchAuthSessions, fetchCpaApiKeyOptions, fetchCpaApiKeySettings, fetchStatus, fetchUpdateCheck, fetchUsageEventModelFilterOptions, fetchUsageEventRequestLog, fetchUsageEventSourceFilterOptions, fetchUsageEvents, fetchVersion, logout, revokeAuthSession, updateCpaApiKeyAlias, type UsageEventsExportFormat } from '@/lib/api';
+import type { AnalysisResponse, AuthManagedSessionItem, CpaApiKeyOption, CpaApiKeySettingsItem, OverviewRealtimeWindow, StatusResponse, UsageEvent, UsageEventRequestLogResponse, UsageSourceFilterOption, VersionResponse } from '@/lib/types';
 import { LoadingSpinner } from '@/components/ui/LoadingSpinner';
 import { LanguageSwitcher } from '@/components/ui/LanguageSwitcher';
 import { Select } from '@/components/ui/Select';
+import { Button } from '@/components/ui/Button';
+import { Modal } from '@/components/ui/Modal';
 import { IconRefreshCw } from '@/components/ui/icons';
 import { useMediaQuery } from '@/hooks/useMediaQuery';
 import { useHeaderRefresh } from '@/hooks/useHeaderRefresh';
 import { useThemeStore } from '@/stores';
 import {
   StatCards,
+  DailyAveragePanel,
   OverviewRealtimePanel,
   AnalysisPanel,
   ApiKeySettingsCard,
+  SessionSettingsCard,
   PriceSettingsCard,
   AuthFileCredentialsSection,
   AiProviderCredentialsSection,
@@ -32,11 +36,13 @@ import {
   type RequestEventColumnId,
 } from '@/components/usage/RequestEventsDetailsCard';
 import { buildUsageRangeQuery } from '@/utils/usage/rangeQuery';
+import { getDailyAveragePanelUsage, isDailyAverageRange } from '@/utils/usage/overview';
 import {
   type UsageTimeRange
 } from '@/utils/usage';
 import type { Theme } from '@/types';
 import { BrandLink } from '@/components/BrandLink';
+import { isCPAMCEmbed } from '@/embed/cpamcEmbed';
 import styles from './UsagePage.module.scss';
 
 const TIME_RANGE_STORAGE_KEY = 'cli-proxy-usage-time-range-v1';
@@ -77,10 +83,10 @@ const DEFAULT_USAGE_TAB: UsageTab = 'overview';
 const USAGE_TAB_STORAGE_KEY = 'cli-proxy-usage-tab-v1';
 const REQUEST_EVENTS_PAGE_SIZES = [20, 50, 100, 500, 1000] as const;
 const REQUEST_EVENTS_DEFAULT_PAGE_SIZE = 100;
+const REQUEST_EVENTS_PREFERENCES_VERSION = 3;
 const ALL_REQUEST_EVENTS_FILTER = '__all__';
 const OVERVIEW_AUTO_REFRESH_INTERVAL_MS = 10_000;
 export const CUSTOM_DATE_RANGE_BOUNDS_REFRESH_INTERVAL_MS = 60_000;
-export const STATUS_ACTIVE_HEARTBEAT_INTERVAL_MS = 30_000;
 const CPA_MANAGEMENT_PAGE = 'management.html';
 const ABSOLUTE_HTTP_URL_PATTERN = /^https?:\/\//i;
 const EXPLICIT_URL_SCHEME_PATTERN = /^[a-z][a-z\d+.-]*:/i;
@@ -96,7 +102,7 @@ export const shouldShowRangeControls = (tab: UsageTab) => tab !== 'settings' && 
 
 export const shouldShowApiKeyFilter = (tab: UsageTab) => shouldShowRangeControls(tab);
 
-export const shouldShowUpdateCheckButton = (status: Pick<StatusResponse, 'updateCheckEnabled'> | null) => status?.updateCheckEnabled === true;
+export const shouldShowUpdateCheckButton = (versionInfo: Pick<VersionResponse, 'updateCheckEnabled'> | null) => versionInfo?.updateCheckEnabled === true;
 
 export const isUsagePageVisible = (documentRef?: Pick<Document, 'visibilityState'>) => {
   const targetDocument = documentRef ?? (typeof document === 'undefined' ? undefined : document);
@@ -174,7 +180,7 @@ type RequestEventFilterOptionsState = {
 };
 
 export type RequestEventsPreferences = {
-  version: 1;
+  version: typeof REQUEST_EVENTS_PREFERENCES_VERSION;
   pageSize: number;
   filters: RequestEventFilterState;
   visibleColumnIds: RequestEventColumnId[];
@@ -189,11 +195,15 @@ const DEFAULT_REQUEST_EVENT_FILTERS: RequestEventFilterState = {
 };
 
 const buildDefaultRequestEventsPreferences = (): RequestEventsPreferences => ({
-  version: 1,
+  version: REQUEST_EVENTS_PREFERENCES_VERSION,
   pageSize: REQUEST_EVENTS_DEFAULT_PAGE_SIZE,
   filters: { ...DEFAULT_REQUEST_EVENT_FILTERS },
   visibleColumnIds: [...REQUEST_EVENT_COLUMN_IDS],
 });
+
+const LEGACY_REQUEST_EVENT_COLUMN_IDS_WITHOUT_MODEL_ALIAS = REQUEST_EVENT_COLUMN_IDS.filter((columnId) => columnId !== 'model_alias');
+const LEGACY_REQUEST_EVENT_COLUMN_IDS_WITHOUT_SPEED_MODE = REQUEST_EVENT_COLUMN_IDS.filter((columnId) => columnId !== 'service_tier');
+const LEGACY_REQUEST_EVENT_COLUMN_IDS_WITHOUT_SPEED_MODE_AND_MODEL_ALIAS = REQUEST_EVENT_COLUMN_IDS.filter((columnId) => columnId !== 'service_tier' && columnId !== 'model_alias');
 
 const isRecord = (value: unknown): value is Record<string, unknown> => (
   typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -224,20 +234,42 @@ const normalizeRequestEventPreferenceFilters = (value: unknown): RequestEventFil
   };
 };
 
-const normalizeRequestEventPreferenceColumnIds = (value: unknown): RequestEventColumnId[] => {
+const hasSameRequestEventColumnOrder = (
+  left: readonly RequestEventColumnId[],
+  right: readonly RequestEventColumnId[]
+): boolean => left.length === right.length && left.every((columnId, index) => columnId === right[index]);
+
+const normalizeRequestEventPreferenceColumnIds = (value: unknown, version: unknown): RequestEventColumnId[] => {
   if (!Array.isArray(value)) {
     return [...REQUEST_EVENT_COLUMN_IDS];
   }
-  return normalizeRequestEventVisibleColumnIds(value.filter(isRequestEventColumnId));
+  const normalized = normalizeRequestEventVisibleColumnIds(value.filter(isRequestEventColumnId));
+  if (
+    version !== REQUEST_EVENTS_PREFERENCES_VERSION &&
+    hasSameRequestEventColumnOrder(normalized, LEGACY_REQUEST_EVENT_COLUMN_IDS_WITHOUT_MODEL_ALIAS)
+  ) {
+    return [...REQUEST_EVENT_COLUMN_IDS];
+  }
+  if (
+    typeof version === 'number' &&
+    version < 2 &&
+    (
+      hasSameRequestEventColumnOrder(normalized, LEGACY_REQUEST_EVENT_COLUMN_IDS_WITHOUT_SPEED_MODE) ||
+      hasSameRequestEventColumnOrder(normalized, LEGACY_REQUEST_EVENT_COLUMN_IDS_WITHOUT_SPEED_MODE_AND_MODEL_ALIAS)
+    )
+  ) {
+    return [...REQUEST_EVENT_COLUMN_IDS];
+  }
+  return normalized;
 };
 
 export const normalizeRequestEventsPreferences = (value: unknown): RequestEventsPreferences => {
   const preferences = isRecord(value) ? value : {};
   return {
-    version: 1,
+    version: REQUEST_EVENTS_PREFERENCES_VERSION,
     pageSize: isRequestEventPageSize(preferences.pageSize) ? preferences.pageSize : REQUEST_EVENTS_DEFAULT_PAGE_SIZE,
     filters: normalizeRequestEventPreferenceFilters(preferences.filters),
-    visibleColumnIds: normalizeRequestEventPreferenceColumnIds(preferences.visibleColumnIds),
+    visibleColumnIds: normalizeRequestEventPreferenceColumnIds(preferences.visibleColumnIds, preferences.version),
   };
 };
 
@@ -306,26 +338,76 @@ type CustomDateRangeBoundsRefreshOptions = {
   intervalMs?: number;
 };
 
-type StatusActiveHeartbeatDocument = Pick<Document, 'visibilityState' | 'addEventListener' | 'removeEventListener'>;
+type VersionInfoLoader = (signal: AbortSignal) => Promise<VersionResponse>;
 
-type StatusActiveHeartbeatTimerTarget = {
-  setInterval: (handler: () => void, timeout: number) => number;
-  clearInterval: (handle: number) => void;
+type UsagePageVersionInfoOptions = {
+  loadVersion: VersionInfoLoader;
+  signal: AbortSignal;
+  setVersionInfo: (versionInfo: VersionResponse | null) => void;
+  onAuthRequired?: () => void;
 };
 
-type StatusActiveHeartbeatOptions = {
-  loadStatus: (signal: AbortSignal) => Promise<StatusResponse>;
-  markActive: (signal: AbortSignal) => Promise<void>;
-  setStatus: (status: StatusResponse) => void;
-  setStatusError: (error: string) => void;
-  onAuthRequired?: () => void;
-  documentRef?: StatusActiveHeartbeatDocument;
-  timerTarget?: StatusActiveHeartbeatTimerTarget;
-  intervalMs?: number;
+type RequestLogDownloadGenerationRef = {
+  current: number;
+};
+
+type UsageEventRequestLogDownloadOptions = {
+  eventId: string;
+  generationRef: RequestLogDownloadGenerationRef;
+  createDownloadURL?: (eventId: string) => Promise<string>;
+  triggerDownload?: (url: string) => void;
+  setDownloading: (downloading: boolean) => void;
+  showDownloadError: (error: unknown) => void;
+};
+
+export const loadUsagePageVersionInfo = async ({
+  loadVersion,
+  signal,
+  setVersionInfo,
+  onAuthRequired,
+}: UsagePageVersionInfoOptions) => {
+  try {
+    const nextVersionInfo = await loadVersion(signal);
+    if (signal.aborted) return;
+    setVersionInfo(nextVersionInfo);
+  } catch (error) {
+    if (signal.aborted) return;
+    if (error instanceof ApiError && error.status === 401) {
+      onAuthRequired?.();
+      return;
+    }
+    setVersionInfo(null);
+  }
 };
 
 export const refreshPageData = async ({ refreshActiveTab }: RefreshPageDataOptions) => {
   await refreshActiveTab();
+};
+
+export const runUsageEventRequestLogDownload = async ({
+  eventId,
+  generationRef,
+  createDownloadURL = createUsageEventRequestLogDownloadURL,
+  triggerDownload = triggerBrowserURLDownload,
+  setDownloading,
+  showDownloadError,
+}: UsageEventRequestLogDownloadOptions) => {
+  const normalizedEventId = eventId.trim();
+  if (!normalizedEventId) return;
+  const generation = generationRef.current;
+  setDownloading(true);
+  try {
+    const downloadURL = await createDownloadURL(normalizedEventId);
+    if (generationRef.current !== generation) return;
+    triggerDownload(downloadURL);
+  } catch (error) {
+    if (generationRef.current !== generation) return;
+    showDownloadError(error);
+  } finally {
+    if (generationRef.current === generation) {
+      setDownloading(false);
+    }
+  }
 };
 
 export const getOverviewDisplayLoading = ({ loading, hasUsage }: { loading: boolean; hasUsage: boolean }) => loading && !hasUsage;
@@ -426,97 +508,6 @@ export const scheduleCustomDateRangeBoundsRefresh = ({
     active = false;
     timers.clearInterval(timer);
     targetDocument?.removeEventListener('visibilitychange', handleVisibilityChange);
-  };
-};
-
-export const scheduleStatusActiveHeartbeat = ({
-  loadStatus,
-  markActive,
-  setStatus,
-  setStatusError,
-  onAuthRequired,
-  documentRef,
-  timerTarget,
-  intervalMs = STATUS_ACTIVE_HEARTBEAT_INTERVAL_MS,
-}: StatusActiveHeartbeatOptions) => {
-  const targetDocument = documentRef ?? (typeof document === 'undefined' ? undefined : document);
-  const timers = timerTarget ?? (typeof window === 'undefined' ? undefined : {
-    setInterval: window.setInterval.bind(window),
-    clearInterval: window.clearInterval.bind(window),
-  });
-  if (!timers) {
-    return () => undefined;
-  }
-
-  let controller: AbortController | null = null;
-  let timer: number | null = null;
-  const isVisible = () => isUsagePageVisible(targetDocument);
-  const stopTimer = () => {
-    if (timer !== null) {
-      timers.clearInterval(timer);
-      timer = null;
-    }
-  };
-  const stopPolling = () => {
-    controller?.abort();
-    controller = null;
-    stopTimer();
-  };
-  const loadAndMaybeMarkActive = async () => {
-    controller?.abort();
-    const requestController = new AbortController();
-    controller = requestController;
-    try {
-      // status 成功后才发送 active 心跳，避免异常页面状态把后端误标记为活跃。
-      const status = await loadStatus(requestController.signal);
-      setStatus(status);
-      setStatusError(status.last_error || '');
-      if (status.quotaAutoRefreshEnabled !== true) {
-        stopTimer();
-        return false;
-      }
-      await markActive(requestController.signal);
-      return true;
-    } catch (error) {
-      if (requestController.signal.aborted) return;
-      if (error instanceof ApiError && error.status === 401) {
-        onAuthRequired?.();
-      }
-      return false;
-    } finally {
-      if (controller === requestController) {
-        controller = null;
-      }
-    }
-  };
-  const startPolling = () => {
-    if (!isVisible()) {
-      stopPolling();
-      return;
-    }
-    void loadAndMaybeMarkActive().then((shouldHeartbeat) => {
-      if (!shouldHeartbeat || !isVisible() || timer !== null) {
-        return;
-      }
-      timer = timers.setInterval(() => {
-        void loadAndMaybeMarkActive();
-      }, intervalMs);
-    });
-  };
-  const handleVisibilityChange = () => {
-    stopPolling();
-    startPolling();
-  };
-
-  startPolling();
-  if (targetDocument) {
-    targetDocument.addEventListener('visibilitychange', handleVisibilityChange);
-  }
-  return () => {
-    if (targetDocument) {
-      targetDocument.removeEventListener('visibilitychange', handleVisibilityChange);
-    }
-    stopPolling();
   };
 };
 
@@ -740,9 +731,31 @@ const loadRealtimeWindow = (): OverviewRealtimeWindow => {
   }
 };
 
+export const triggerBrowserFileDownload = (blob: Blob, filename: string) => {
+  const url = window.URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  window.URL.revokeObjectURL(url);
+};
+
+export const triggerBrowserURLDownload = (url: string) => {
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = '';
+  link.rel = 'noopener';
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+};
+
 export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
   const { t } = useTranslation();
   const isMobile = useMediaQuery('(max-width: 768px)');
+  const isEmbeddedInCPAMC = isCPAMCEmbed();
   const theme = useThemeStore((state) => state.theme);
   const resolvedTheme = useThemeStore((state) => state.resolvedTheme);
   const setTheme = useThemeStore((state) => state.setTheme);
@@ -754,6 +767,7 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
   const [selectedApiKeyId, setSelectedApiKeyId] = useState('');
   const [apiKeyOptions, setApiKeyOptions] = useState<CpaApiKeyOption[]>([]);
   const [status, setStatus] = useState<StatusResponse | null>(null);
+  const [versionInfo, setVersionInfo] = useState<VersionResponse | null>(null);
   const [customDateRangeAnchorMs, setCustomDateRangeAnchorMs] = useState(() => Date.now());
   const apiKeyOptionsRequestControllerRef = useRef<AbortController | null>(null);
   const credentialSectionVisibility = getCredentialSectionVisibility(activeTab);
@@ -765,6 +779,7 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
 
   const {
     usage,
+    currentUsage: currentOverviewUsage,
     loading,
     error,
     lastRefreshedAt,
@@ -794,7 +809,8 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
     loading: pricingLoading,
     error: pricingError,
     loadPricing,
-    setModelPrices,
+    saveModelPrice,
+    deleteModelPrice,
     syncModelPrices,
     previewPricingSync,
   } = usePricingData({
@@ -806,11 +822,17 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
   const [apiKeySettingsError, setApiKeySettingsError] = useState('');
   const [apiKeySettingsSavingId, setApiKeySettingsSavingId] = useState<string | null>(null);
   const apiKeySettingsRequestControllerRef = useRef<AbortController | null>(null);
+  const [authSessions, setAuthSessions] = useState<AuthManagedSessionItem[]>([]);
+  const [authSessionsLoading, setAuthSessionsLoading] = useState(false);
+  const [authSessionsError, setAuthSessionsError] = useState('');
+  const [authSessionRevokingId, setAuthSessionRevokingId] = useState<string | null>(null);
+  const authSessionsRequestControllerRef = useRef<AbortController | null>(null);
   const [statusError, setStatusError] = useState('');
   const [updateCheckLoading, setUpdateCheckLoading] = useState(false);
   const [topNotice, setTopNotice] = useState<{ kind: TopNoticeKind; message: string } | null>(null);
   const [hasNewVersion, setHasNewVersion] = useState(false);
   const [loggingOut, setLoggingOut] = useState(false);
+  const [logoutConfirmOpen, setLogoutConfirmOpen] = useState(false);
   const topNoticeTimerRef = useRef<ReturnType<typeof window.setTimeout> | null>(null);
   const [customRangeError, setCustomRangeError] = useState('');
   const [customRangeHint, setCustomRangeHint] = useState('');
@@ -828,9 +850,17 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
   const [eventsSourceFilter, setEventsSourceFilter] = useState(initialRequestEventsPreferences.filters.source);
   const [eventsResultFilter, setEventsResultFilter] = useState(initialRequestEventsPreferences.filters.result);
   const [eventsVisibleColumnIds, setEventsVisibleColumnIds] = useState<RequestEventColumnId[]>(initialRequestEventsPreferences.visibleColumnIds);
+  const [eventsExportingFormat, setEventsExportingFormat] = useState<UsageEventsExportFormat | null>(null);
   const [eventsFilterOptionsLoaded, setEventsFilterOptionsLoaded] = useState(false);
+  const [requestLogResponse, setRequestLogResponse] = useState<UsageEventRequestLogResponse | null>(null);
+  const [requestLogError, setRequestLogError] = useState('');
+  const [requestLogLoadingEventId, setRequestLogLoadingEventId] = useState<string | null>(null);
+  const [requestLogDownloading, setRequestLogDownloading] = useState(false);
+  const requestLogAccessEnabled = status?.cpa_request_log_access_enabled === true;
+  const requestLogDownloadGenerationRef = useRef(0);
   const eventsRequestControllerRef = useRef<AbortController | null>(null);
   const eventsFilterOptionsRequestControllerRef = useRef<AbortController | null>(null);
+  const requestLogControllerRef = useRef<AbortController | null>(null);
   const [manualRefreshLoading, setManualRefreshLoading] = useState(false);
   const [pageVisible, setPageVisible] = useState(isUsagePageVisible);
   const showTopNotice = useCallback((kind: TopNoticeKind, message: string) => {
@@ -846,7 +876,6 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
   const credentialsData = useCredentialsTabData({
     enabledAuthFiles: credentialSectionVisibility.showAuthFiles && pageVisible,
     enabledAiProviders: credentialSectionVisibility.showAiProvider && pageVisible,
-    quotaAutoRefreshEnabled: status?.quotaAutoRefreshEnabled === true,
     onAuthRequired,
     onNotice: showTopNotice,
   });
@@ -971,6 +1000,39 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
     }
   }, [onAuthRequired]);
 
+  const loadAuthSessions = useCallback(async () => {
+    authSessionsRequestControllerRef.current?.abort();
+    const controller = new AbortController();
+    authSessionsRequestControllerRef.current = controller;
+
+    setAuthSessionsLoading(true);
+    setAuthSessionsError('');
+    try {
+      const response = await fetchAuthSessions(controller.signal);
+      if (authSessionsRequestControllerRef.current !== controller) {
+        return;
+      }
+      setAuthSessions(response.items ?? []);
+    } catch (error) {
+      if (controller.signal.aborted) {
+        return;
+      }
+      if (authSessionsRequestControllerRef.current === controller) {
+        setAuthSessions([]);
+      }
+      if (error instanceof ApiError && error.status === 401) {
+        onAuthRequired?.();
+        return;
+      }
+      setAuthSessionsError(error instanceof Error ? error.message : 'Failed to load auth sessions');
+    } finally {
+      if (authSessionsRequestControllerRef.current === controller) {
+        setAuthSessionsLoading(false);
+        authSessionsRequestControllerRef.current = null;
+      }
+    }
+  }, [onAuthRequired]);
+
   const handleSaveApiKeyAlias = useCallback(async (id: string, keyAlias: string) => {
     setApiKeySettingsSavingId(id);
     setApiKeySettingsError('');
@@ -990,6 +1052,29 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
       setApiKeySettingsSavingId(null);
     }
   }, [onAuthRequired, showTopNotice, t]);
+
+  const handleRevokeAuthSession = useCallback(async (session: AuthManagedSessionItem) => {
+    setAuthSessionRevokingId(session.id);
+    setAuthSessionsError('');
+    try {
+      await revokeAuthSession(session.id);
+      showTopNotice('success', t('usage_stats.session_settings_logout_success'));
+      if (session.current) {
+        onAuthRequired?.();
+        return;
+      }
+      await loadAuthSessions();
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) {
+        onAuthRequired?.();
+        return;
+      }
+      setAuthSessionsError(error instanceof Error ? error.message : 'Failed to revoke auth session');
+      showTopNotice('error', t('usage_stats.session_settings_logout_failed'));
+    } finally {
+      setAuthSessionRevokingId(null);
+    }
+  }, [loadAuthSessions, onAuthRequired, showTopNotice, t]);
 
   const loadAnalysis = useCallback(async () => {
     const queryWindow = buildUsageRangeQuery({
@@ -1103,7 +1188,7 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
 
   useEffect(() => {
     saveRequestEventsPreferences({
-      version: 1,
+      version: REQUEST_EVENTS_PREFERENCES_VERSION,
       pageSize: eventsPageSize,
       filters: {
         model: eventsModelFilter,
@@ -1131,7 +1216,7 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
   }), [timeRange]);
 
   useEffect(() => {
-    // Credentials 列表、quota cache 和 task polling 都跟页面可见性绑定，隐藏页不保持续约或轮询。
+    // Credentials 列表、quota cache 和 task polling 都跟页面可见性绑定，隐藏页不保持刷新或轮询。
     const syncPageVisible = () => setPageVisible(isUsagePageVisible());
     syncPageVisible();
     if (typeof document === 'undefined') {
@@ -1144,14 +1229,35 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
   }, []);
 
   useEffect(() => {
-    // 页面级心跳独立于 Credentials tab；调度函数内部负责可见性、abort 和 timer 清理。
-    return scheduleStatusActiveHeartbeat({
-      loadStatus: fetchStatus,
-      markActive: markStatusActive,
-      setStatus,
-      setStatusError,
+    const requestController = new AbortController();
+    void fetchStatus(requestController.signal)
+      .then((nextStatus) => {
+        if (requestController.signal.aborted) return;
+        setStatus(nextStatus);
+        setStatusError(nextStatus.last_error || '');
+      })
+      .catch((error: unknown) => {
+        if (requestController.signal.aborted) return;
+        if (error instanceof ApiError && error.status === 401) {
+          onAuthRequired?.();
+        }
+      });
+    return () => {
+      requestController.abort();
+    };
+  }, [onAuthRequired]);
+
+  useEffect(() => {
+    const requestController = new AbortController();
+    void loadUsagePageVersionInfo({
+      loadVersion: fetchVersion,
+      signal: requestController.signal,
+      setVersionInfo,
       onAuthRequired,
     });
+    return () => {
+      requestController.abort();
+    };
   }, [onAuthRequired]);
 
   useEffect(() => {
@@ -1169,10 +1275,10 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
   }, [apiKeyOptions, selectedApiKeyId]);
 
   useEffect(() => {
-    if (!shouldShowUpdateCheckButton(status)) {
+    if (!shouldShowUpdateCheckButton(versionInfo)) {
       setHasNewVersion(false);
     }
-  }, [status]);
+  }, [versionInfo]);
 
   useEffect(() => () => {
     if (topNoticeTimerRef.current !== null) {
@@ -1310,6 +1416,97 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
     resetEventsPage();
   }, [resetEventsPage]);
 
+  const handleEventsExport = useCallback(async (format: UsageEventsExportFormat) => {
+    const queryWindow = getEventQueryWindow();
+    if (!queryWindow.valid) {
+      return;
+    }
+    setEventsExportingFormat(format);
+    try {
+      const file = await exportUsageEvents(timeRange, queryWindow.start, queryWindow.end, format, {
+        model: eventsModelFilter === ALL_REQUEST_EVENTS_FILTER ? undefined : eventsModelFilter,
+        source: eventsSourceFilter === ALL_REQUEST_EVENTS_FILTER ? undefined : eventsSourceFilter,
+        result: eventsResultFilter === ALL_REQUEST_EVENTS_FILTER ? undefined : eventsResultFilter,
+        apiKeyId: selectedApiKeyId,
+      });
+      triggerBrowserFileDownload(file.blob, file.filename);
+      showTopNotice('success', t('usage_stats.export_success'));
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) {
+        onAuthRequired?.();
+        return;
+      }
+      showTopNotice('error', t('notification.download_failed'));
+    } finally {
+      setEventsExportingFormat(null);
+    }
+  }, [eventsModelFilter, eventsResultFilter, eventsSourceFilter, getEventQueryWindow, onAuthRequired, selectedApiKeyId, showTopNotice, t, timeRange]);
+
+  const handleRequestLogOpen = useCallback(async (event: UsageEvent) => {
+    if (!requestLogAccessEnabled) return;
+    const eventId = String(event.id ?? '').trim();
+    if (!eventId) {
+      setRequestLogResponse(null);
+      setRequestLogError(t('usage_stats.request_events_log_missing_event'));
+      return;
+    }
+    requestLogControllerRef.current?.abort();
+    const controller = new AbortController();
+    requestLogControllerRef.current = controller;
+    setRequestLogLoadingEventId(eventId);
+    setRequestLogResponse(null);
+    setRequestLogError('');
+    try {
+      const response = await fetchUsageEventRequestLog(eventId, controller.signal);
+      if (requestLogControllerRef.current !== controller) return;
+      setRequestLogResponse(response);
+    } catch (error) {
+      if (controller.signal.aborted) return;
+      if (error instanceof ApiError && error.status === 401) {
+        onAuthRequired?.();
+        return;
+      }
+      const missing = error instanceof ApiError && error.status === 404;
+      setRequestLogError(
+        missing
+          ? t('usage_stats.request_events_log_unavailable')
+          : t('usage_stats.request_events_log_load_failed')
+      );
+    } finally {
+      if (requestLogControllerRef.current === controller) {
+        requestLogControllerRef.current = null;
+        setRequestLogLoadingEventId(null);
+      }
+    }
+  }, [onAuthRequired, requestLogAccessEnabled, t]);
+
+  const handleRequestLogClose = useCallback(() => {
+    requestLogDownloadGenerationRef.current += 1;
+    requestLogControllerRef.current?.abort();
+    requestLogControllerRef.current = null;
+    setRequestLogLoadingEventId(null);
+    setRequestLogResponse(null);
+    setRequestLogError('');
+    setRequestLogDownloading(false);
+  }, []);
+
+  const handleRequestLogDownload = useCallback(async (eventId: string) => {
+    if (!requestLogAccessEnabled) return;
+    requestLogDownloadGenerationRef.current += 1;
+    await runUsageEventRequestLogDownload({
+      eventId,
+      generationRef: requestLogDownloadGenerationRef,
+      setDownloading: setRequestLogDownloading,
+      showDownloadError: (error) => {
+        if (error instanceof ApiError && error.status === 401) {
+          onAuthRequired?.();
+          return;
+        }
+        showTopNotice('error', t('notification.download_failed'));
+      },
+    });
+  }, [onAuthRequired, requestLogAccessEnabled, showTopNotice, t]);
+
   const refreshActiveTab = useCallback(async () => {
     if (activeTab === 'events') {
       await Promise.all([loadEventFilterOptions(), loadEvents()]);
@@ -1324,11 +1521,11 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
       return;
     }
     if (activeTab === 'settings') {
-      await Promise.all([loadApiKeySettings(), loadPricing()]);
+      await Promise.all([loadAuthSessions(), loadApiKeySettings(), loadPricing()]);
       return;
     }
     await Promise.all([loadUsage(), loadRealtime()]);
-  }, [activeTab, credentialSectionVisibility.enabled, loadAnalysis, loadApiKeySettings, loadEventFilterOptions, loadEvents, loadPricing, loadRealtime, loadUsage, refreshCredentials]);
+  }, [activeTab, credentialSectionVisibility.enabled, loadAnalysis, loadApiKeySettings, loadAuthSessions, loadEventFilterOptions, loadEvents, loadPricing, loadRealtime, loadUsage, refreshCredentials]);
 
   const refreshAutoRefreshTab = useCallback(async () => {
     if (activeTab === 'events') {
@@ -1370,11 +1567,16 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
     }
   }, [onAuthRequired, refreshActiveTab]);
 
-  const handleLogout = useCallback(async () => {
+  const handleRequestLogout = useCallback(() => {
+    setLogoutConfirmOpen(true);
+  }, []);
+
+  const handleConfirmLogout = useCallback(async () => {
     setLoggingOut(true);
     try {
       await logout();
     } finally {
+      setLogoutConfirmOpen(false);
       onAuthRequired?.();
       setLoggingOut(false);
     }
@@ -1414,26 +1616,45 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
     onRefreshError: handleAutoRefreshError,
   }), [autoRefreshEnabled, handleAutoRefreshError, refreshAutoRefreshTab]);
 
-  useHeaderRefresh(refreshActiveTab);
+	  useHeaderRefresh(refreshActiveTab);
+
+  useEffect(() => () => {
+    requestLogDownloadGenerationRef.current += 1;
+    requestLogControllerRef.current?.abort();
+    requestLogControllerRef.current = null;
+  }, []);
+
+	  useEffect(() => {
+	    if (activeTab === 'events') return;
+	    handleRequestLogClose();
+	  }, [activeTab, handleRequestLogClose]);
+
+	  useEffect(() => {
+	    if (activeTab !== 'events') {
+      eventsFilterOptionsRequestControllerRef.current?.abort();
+      eventsFilterOptionsRequestControllerRef.current = null;
+      return;
+    }
+    void loadEventFilterOptions();
+    return () => {
+      eventsFilterOptionsRequestControllerRef.current?.abort();
+      eventsFilterOptionsRequestControllerRef.current = null;
+    };
+  }, [activeTab, loadEventFilterOptions]);
 
   useEffect(() => {
     if (activeTab !== 'events') {
       eventsRequestControllerRef.current?.abort();
       eventsRequestControllerRef.current = null;
-      eventsFilterOptionsRequestControllerRef.current?.abort();
-      eventsFilterOptionsRequestControllerRef.current = null;
       setEventsLoading(false);
       return;
     }
-    void loadEventFilterOptions();
     void loadEvents();
     return () => {
       eventsRequestControllerRef.current?.abort();
       eventsRequestControllerRef.current = null;
-      eventsFilterOptionsRequestControllerRef.current?.abort();
-      eventsFilterOptionsRequestControllerRef.current = null;
     };
-  }, [activeTab, loadEventFilterOptions, loadEvents]);
+  }, [activeTab, loadEvents]);
 
   useEffect(() => {
     if (activeTab !== 'analysis') {
@@ -1454,14 +1675,20 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
       apiKeySettingsRequestControllerRef.current?.abort();
       apiKeySettingsRequestControllerRef.current = null;
       setApiKeySettingsLoading(false);
+      authSessionsRequestControllerRef.current?.abort();
+      authSessionsRequestControllerRef.current = null;
+      setAuthSessionsLoading(false);
       return;
     }
     void loadApiKeySettings();
+    void loadAuthSessions();
     return () => {
       apiKeySettingsRequestControllerRef.current?.abort();
       apiKeySettingsRequestControllerRef.current = null;
+      authSessionsRequestControllerRef.current?.abort();
+      authSessionsRequestControllerRef.current = null;
     };
-  }, [activeTab, loadApiKeySettings]);
+  }, [activeTab, loadApiKeySettings, loadAuthSessions]);
 
   useEffect(() => {
     const next = sanitizeRequestEventFilters(
@@ -1514,9 +1741,15 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
   } = useSparklines({ usage, loading });
 
   const overviewDisplayLoading = getOverviewDisplayLoading({ loading, hasUsage: Boolean(usage) });
+  const reserveDailyAveragePanel = isDailyAverageRange({
+    range: timeRange,
+    customStart: effectiveCustomTimeRange.start,
+    customEnd: effectiveCustomTimeRange.end,
+  });
+  const dailyAveragePanelUsage = getDailyAveragePanelUsage(currentOverviewUsage, usage, reserveDailyAveragePanel, loading);
 
   return (
-    <div className={styles.pageShell}>
+    <div className={styles.pageShell} data-keeper-page="usage">
       <div className={styles.pageFrame}>
         <header className={styles.topBar}>
           <div className={styles.brandBlock}>
@@ -1541,7 +1774,7 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
                 );
               })}
             </div>
-            {shouldShowUpdateCheckButton(status) && (
+            {shouldShowUpdateCheckButton(versionInfo) && (
               <div className={styles.updateCheckSwitcher} role="group" aria-label={t('usage_stats.check_updates')}>
                 <button
                   type="button"
@@ -1569,7 +1802,7 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
               <button
                 type="button"
                 className={`${styles.signOutPill} ${styles.signOutPillActive}`.trim()}
-                onClick={() => void handleLogout()}
+                onClick={handleRequestLogout}
                 disabled={loggingOut}
               >
                 <span className={styles.signOutPillInner}>{loggingOut ? t('common.loading') : t('common.logout')}</span>
@@ -1589,14 +1822,14 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
               </div>
             )}
 
-            {(cpaManagementURL || lastSyncAt) && (
+            {((!isEmbeddedInCPAMC && cpaManagementURL) || lastSyncAt) && (
               <div className={styles.toolbarMetaRow}>
                 {lastSyncAt && (
                   <span className={styles.lastRefreshed}>
                     {t('usage_stats.last_updated')}: {lastSyncAt.toLocaleTimeString()}
                   </span>
                 )}
-                {cpaManagementURL && (
+                {(!isEmbeddedInCPAMC && cpaManagementURL) && (
                   <div className={styles.toolbarMetaRight}>
                     <a
                       className={styles.backToCpaLink}
@@ -1789,11 +2022,14 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
 
             {activeTab === 'overview' && error && <div className={styles.errorBox}>{error === 'AUTH_REQUIRED' ? t('auth.session_expired') : error}</div>}
             {activeTab === 'settings' && pricingError && <div className={styles.errorBox}>{pricingError === 'AUTH_REQUIRED' ? t('auth.session_expired') : pricingError}</div>}
+            {activeTab === 'settings' && authSessionsError && <div className={styles.errorBox}>{authSessionsError}</div>}
             {activeTab === 'settings' && apiKeySettingsError && <div className={styles.errorBox}>{apiKeySettingsError}</div>}
-            {!(activeTab === 'overview' ? error : activeTab === 'settings' ? (pricingError || apiKeySettingsError) : '') && displayStatusError && <div className={styles.errorBox}>{displayStatusError}</div>}
+            {!(activeTab === 'overview' ? error : activeTab === 'settings' ? (pricingError || authSessionsError || apiKeySettingsError) : '') && displayStatusError && <div className={styles.errorBox}>{displayStatusError}</div>}
 
             {activeTab === 'overview' && (
               <>
+                <DailyAveragePanel usage={dailyAveragePanelUsage} loading={overviewDisplayLoading} reserveVisible={reserveDailyAveragePanel} />
+
                 <StatCards
                   usage={usage}
                   loading={overviewDisplayLoading}
@@ -1845,13 +2081,23 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
                   modelFilter={eventsModelFilter}
                   sourceFilter={eventsSourceFilter}
                   resultFilter={eventsResultFilter}
+                  exportingFormat={eventsExportingFormat}
                   visibleColumnIds={eventsVisibleColumnIds}
                   onPageChange={setEventsPage}
                   onPageSizeChange={handleEventsPageSizeChange}
                   onModelFilterChange={handleEventsModelFilterChange}
                   onSourceFilterChange={handleEventsSourceFilterChange}
                   onResultFilterChange={handleEventsResultFilterChange}
+                  onExport={handleEventsExport}
                   onVisibleColumnIdsChange={setEventsVisibleColumnIds}
+                  requestLogAccessEnabled={requestLogAccessEnabled}
+                  onRequestLogOpen={handleRequestLogOpen}
+                  requestLogLoadingEventId={requestLogLoadingEventId}
+                  requestLogResponse={requestLogResponse}
+                  requestLogError={requestLogError}
+                  onRequestLogClose={handleRequestLogClose}
+                  onRequestLogDownload={handleRequestLogDownload}
+                  requestLogDownloading={requestLogDownloading}
                 />
               </>
             )}
@@ -1878,7 +2124,6 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
                       loading={credentialsData.loading}
                       quotaRefreshing={credentialsData.quotaRefreshing}
                       quotaRefreshError={credentialsData.quotaRefreshError}
-                      quotaAutoRefreshEnabled={status?.quotaAutoRefreshEnabled === true}
                       quotaInspectionStatus={credentialsData.quotaInspectionStatus}
                       quotaInspectionLoading={credentialsData.quotaInspectionLoading}
                       quotaInspectionStarting={credentialsData.quotaInspectionStarting}
@@ -1890,6 +2135,8 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
                       onRefreshQuota={credentialsData.refreshQuotaForCurrentAuthFilePage}
                       onRefreshQuotaForAuthIndex={credentialsData.refreshQuotaForAuthIndex}
                       onResetQuotaForAuthIndex={credentialsData.resetQuotaForAuthIndex}
+                      aliasSavingId={credentialsData.aliasSavingId}
+                      onSaveAlias={credentialsData.saveUsageIdentityAlias}
                       onRefreshInspectionStatus={credentialsData.refreshQuotaInspectionStatus}
                       onStartInspection={credentialsData.startQuotaInspection}
                       onAfterInvalidAccountAction={credentialsData.refresh}
@@ -1904,6 +2151,8 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
                       pageSize={credentialsData.aiProviderPageSize}
                       sort={credentialsData.aiProviderSort}
                       loading={credentialsData.loading}
+                      aliasSavingId={credentialsData.aliasSavingId}
+                      onSaveAlias={credentialsData.saveUsageIdentityAlias}
                       onPageChange={credentialsData.setAiProviderPage}
                       onPageSizeChange={credentialsData.setAiProviderPageSize}
                       onSortChange={credentialsData.setAiProviderSort}
@@ -1915,6 +2164,12 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
 
             {activeTab === 'settings' && (
               <div className={styles.settingsSections}>
+                <SessionSettingsCard
+                  sessions={authSessions}
+                  loading={authSessionsLoading}
+                  revokingId={authSessionRevokingId}
+                  onLogout={handleRevokeAuthSession}
+                />
                 <ApiKeySettingsCard
                   apiKeys={apiKeySettings}
                   loading={apiKeySettingsLoading}
@@ -1925,7 +2180,8 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
                 <PriceSettingsCard
                   modelNames={modelNames}
                   modelPrices={modelPrices}
-                  onPricesChange={setModelPrices}
+                  onPriceSave={saveModelPrice}
+                  onPriceDelete={deleteModelPrice}
                   onSyncPricesChange={syncModelPrices}
                   onSyncPreview={previewPricingSync}
                   onNotice={showTopNotice}
@@ -1936,6 +2192,24 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
           </div>
         </main>
       </div>
+      <Modal
+        open={logoutConfirmOpen}
+        title={t('usage_stats.logout_confirm_title')}
+        onClose={() => setLogoutConfirmOpen(false)}
+        closeDisabled={loggingOut}
+        footer={
+          <>
+            <Button type="button" variant="secondary" onClick={() => setLogoutConfirmOpen(false)} disabled={loggingOut}>
+              {t('common.cancel')}
+            </Button>
+            <Button type="button" variant="danger" onClick={() => void handleConfirmLogout()} loading={loggingOut}>
+              {loggingOut ? t('common.loading') : t('usage_stats.logout_confirm_action')}
+            </Button>
+          </>
+        }
+      >
+        <p className={styles.sessionSettingsConfirmText}>{t('usage_stats.logout_confirm_body')}</p>
+      </Modal>
     </div>
   );
 }
